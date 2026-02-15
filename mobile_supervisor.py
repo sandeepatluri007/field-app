@@ -83,6 +83,34 @@ def bulk_delete_rows(worksheet, id_list):
         st.error(f"Delete Error: {e}")
         return False
 
+def update_row_data(worksheet, row_id, updated_data):
+    """Finds a row by ID and updates specific columns."""
+    client = get_connection()
+    ws = client.open(SHEET_NAME).worksheet(worksheet)
+    try:
+        cell = ws.find(str(row_id))
+        r = cell.row
+        headers = ws.row_values(1)
+        
+        # Update cells based on header mapping
+        updates = []
+        for col_name, value in updated_data.items():
+            if col_name in headers:
+                col_idx = headers.index(col_name) + 1
+                updates.append({
+                    'range': gspread.utils.rowcol_to_a1(r, col_idx),
+                    'values': [[value]]
+                })
+        
+        if updates:
+            ws.batch_update(updates)
+            clear_cache()
+            return True
+        return False
+    except Exception as e:
+        st.error(f"Update Error: {e}")
+        return False
+
 def update_worker_registry(edited_df):
     """Updates workers from the data editor."""
     client = get_connection()
@@ -152,28 +180,32 @@ sites_list, meter_types_list, materials_list = get_settings_lists()
 workers = get_worker_list()
 current_stock = calculate_stock()
 
-# --- TAB 1: LOG WORK ---
+# --- TAB 1: LOG WORK (UPDATED LAYOUT) ---
 with tabs[0]:
     st.subheader("Daily Activity Log")
     
     with st.form("work_log", clear_on_submit=True):
+        # Row 1: Date & Site
         c_top1, c_top2 = st.columns(2)
         w_date = c_top1.date_input("Date", datetime.today())
         w_site = c_top2.selectbox("Site Name", sites_list)
         
+        # Row 2: Worker
         w_worker = st.selectbox("Installer / Worker", workers)
         
-        st.markdown("---")
-        st.caption("🛠️ Material Consumption")
-        c_mat1, c_mat2 = st.columns(2)
-        qty_cable = c_mat1.number_input("Cable Used (Mtrs)", min_value=0.0, step=1.0)
-        qty_lugs = c_mat2.number_input("Lugs Used (Qty)", min_value=0.0, step=1.0)
-        
+        # Row 3: Asset Details (MOVED UP)
         st.markdown("---")
         st.caption("📍 Installation Details")
         c_asset1, c_asset2 = st.columns(2)
         w_meter_type = c_asset1.selectbox("Meter/Box Type", meter_types_list)
         w_dtr = c_asset2.text_input("DTR Code / ID")
+        
+        # Row 4: Material Consumption (MOVED DOWN)
+        st.markdown("---")
+        st.caption("🛠️ Material Consumption")
+        c_mat1, c_mat2 = st.columns(2)
+        qty_cable = c_mat1.number_input("Cable Used (Mtrs)", min_value=0.0, step=1.0)
+        qty_lugs = c_mat2.number_input("Lugs Used (Qty)", min_value=0.0, step=1.0)
         
         if st.form_submit_button("🚀 Submit Log", type="primary", use_container_width=True):
             batch_rows = []
@@ -268,7 +300,7 @@ with tabs[2]:
     else:
         st.info("No workers found.")
 
-# --- TAB 4: VIEW & MANAGE (FIXED) ---
+# --- TAB 4: VIEW & MANAGE (EDIT & DELETE RESTORED) ---
 with tabs[3]:
     st.subheader("🗂️ Data Management")
     view_mode = st.radio("Select Data Source", ["Work Logs", "Inventory Logs"], horizontal=True, label_visibility="collapsed")
@@ -286,34 +318,76 @@ with tabs[3]:
             df = df.sort_values(by='Date', ascending=False)
             df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
 
-        st.info("💡 Select rows to delete.")
-        
-        # FIX: We drop ID and Synced for display, but map selection back to original DF
+        # --- MULTI-SELECT DELETE SECTION ---
+        st.markdown("### 🗑️ Delete Records")
         display_cols = [c for c in df.columns if c not in ["ID", "Synced"]]
-        
         event = st.dataframe(
             df[display_cols],
             on_select="rerun",
             selection_mode="multi-row",
             use_container_width=True,
-            height=400
+            height=300
         )
         
         if event.selection.rows:
             selected_indices = event.selection.rows
-            # Map display indices back to original DF IDs
             selected_ids = df.iloc[selected_indices]['ID'].tolist()
             count = len(selected_ids)
             
-            st.error(f"⚠️ You have selected {count} records.")
+            if st.button(f"🗑️ Delete {count} Selected Record(s)"):
+                if bulk_delete_rows(target_sheet, selected_ids):
+                    st.success("Deleted successfully!")
+                    time.sleep(1)
+                    st.rerun()
+
+        # --- SINGLE RECORD EDIT SECTION ---
+        st.markdown("---")
+        st.markdown("### ✏️ Edit Record")
+        
+        # Create a dropdown for record selection (easier on mobile than table clicking)
+        # Label format: Date | Site | Item (Qty)
+        if target_sheet == "WorkLogs":
+            df['label'] = df['Date'] + " | " + df['Site'] + " | " + df['Material'] + " (" + df['Qty'].astype(str) + ")"
+        else:
+            df['label'] = df['Date'] + " | " + df['Material'] + " (" + df['Qty'].astype(str) + ")"
             
-            if st.button(f"🗑️ Permanently Delete {count} Record(s)?"):
-                with st.spinner("Deleting..."):
-                    if bulk_delete_rows(target_sheet, selected_ids):
-                        st.success("Deleted successfully!")
+        edit_option = st.selectbox("Select a record to edit:", [""] + df['label'].tolist(), key="edit_sel")
+        
+        if edit_option:
+            sel_row = df[df['label'] == edit_option].iloc[0]
+            sel_id = sel_row['ID']
+            
+            with st.form("edit_form"):
+                st.caption(f"Editing ID: {sel_id}")
+                
+                # Edit Fields
+                new_date = st.text_input("Date (YYYY-MM-DD)", value=sel_row['Date'])
+                
+                if target_sheet == "WorkLogs":
+                    new_site = st.selectbox("Site", sites_list, index=sites_list.index(sel_row['Site']) if sel_row['Site'] in sites_list else 0)
+                    new_worker = st.selectbox("Worker", workers, index=workers.index(sel_row['Worker']) if sel_row['Worker'] in workers else 0)
+                    new_dtr = st.text_input("DTR Code", value=sel_row.get('DTR Code', ''))
+                
+                new_mat = st.selectbox("Material", materials_list, index=materials_list.index(sel_row['Material']) if sel_row['Material'] in materials_list else 0)
+                new_qty = st.number_input("Qty", value=float(sel_row['Qty']))
+                
+                if st.form_submit_button("💾 Save Changes"):
+                    update_data = {
+                        "Date": new_date,
+                        "Material": new_mat,
+                        "Qty": new_qty,
+                        "Synced": "FALSE"
+                    }
+                    if target_sheet == "WorkLogs":
+                        update_data.update({
+                            "Site": new_site,
+                            "Worker": new_worker,
+                            "DTR Code": new_dtr
+                        })
+                    
+                    if update_row_data(target_sheet, sel_id, update_data):
+                        st.success("Record Updated!")
                         time.sleep(1)
                         st.rerun()
-                    else:
-                        st.error("Deletion failed.")
     else:
         st.info(f"No records found in {view_mode}.")
