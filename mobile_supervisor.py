@@ -121,8 +121,8 @@ def calculate_stock():
     return stock
 
 # --- UI SETUP ---
-st.set_page_config(page_title="Site Supervisor", page_icon="👷", layout="centered")
-st.title("👷 Site Supervisor App")
+st.set_page_config(page_title="Field Update", page_icon="👷", layout="centered")
+st.title("👷 Field Update App")
 
 tabs = st.tabs(["📝 Work Logs", "📦 Inventory", "👥 Workers", "📊 View & Manage"])
 
@@ -308,3 +308,4 @@ with tabs[3]:
                         st.rerun()
         else:
             st.info("No inventory logs found.")
+
