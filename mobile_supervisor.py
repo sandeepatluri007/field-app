@@ -9,7 +9,7 @@ import os
 
 # --- CONFIGURATION ---
 SHEET_NAME = "Smart_Infra_DB"
-LOGO_FILE = "logodesign4.jpg"  # Ensure this file is in the same directory
+LOGO_FILE = "logodesign4.jpg"
 
 # --- CACHED CONNECTION ---
 @st.cache_resource
@@ -22,7 +22,6 @@ def get_connection():
             creds_dict = dict(st.secrets["gcp_service_account"])
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
-            # Fallback for local testing if secrets.toml isn't set up
             st.error("⚠️ Secrets not found. Please configure .streamlit/secrets.toml")
             st.stop()
             
@@ -37,7 +36,7 @@ def clear_cache():
     """Clears data cache to force a reload."""
     st.cache_data.clear()
 
-@st.cache_data(ttl=60)  # Cache data for 60 seconds
+@st.cache_data(ttl=60)
 def get_data(worksheet):
     client = get_connection()
     try:
@@ -50,7 +49,7 @@ def save_batch_rows(worksheet, rows_list):
     client = get_connection()
     ws = client.open(SHEET_NAME).worksheet(worksheet)
     ws.append_rows(rows_list)
-    clear_cache() # Clear cache after update
+    clear_cache()
 
 def save_row(worksheet, row_dict):
     client = get_connection()
@@ -66,15 +65,13 @@ def bulk_delete_rows(worksheet, id_list):
     client = get_connection()
     ws = client.open(SHEET_NAME).worksheet(worksheet)
     
-    # We must delete from bottom up to avoid index shifting issues
-    # 1. Find all cells
     try:
         cell_list = []
         for rid in id_list:
             found = ws.findall(str(rid))
             cell_list.extend(found)
         
-        # 2. Get unique rows, sort descending
+        # Sort rows descending to delete safely
         rows_to_delete = sorted(list(set([c.row for c in cell_list])), reverse=True)
         
         for r in rows_to_delete:
@@ -90,18 +87,11 @@ def update_worker_registry(edited_df):
     """Updates workers from the data editor."""
     client = get_connection()
     ws = client.open(SHEET_NAME).worksheet("Workers")
-    
-    # Simple approach: Clear and Rewrite (safer for small lists)
-    # Get headers
     headers = ws.row_values(1)
-    
-    # Prepare data
-    # Ensure 'Name' and 'Synced' columns exist
     if 'Synced' not in edited_df.columns:
         edited_df['Synced'] = "FALSE"
     
     data_to_write = [headers] + edited_df.values.tolist()
-    
     ws.clear()
     ws.update(data_to_write)
     clear_cache()
@@ -148,7 +138,7 @@ st.set_page_config(page_title="Site Supervisor", page_icon="👷", layout="cente
 c_head1, c_head2 = st.columns([1, 4])
 with c_head1:
     if os.path.exists(LOGO_FILE):
-        st.image(LOGO_FILE, width=70) # Small, professional size
+        st.image(LOGO_FILE, width=70)
     else:
         st.write("🏢")
 with c_head2:
@@ -162,27 +152,23 @@ sites_list, meter_types_list, materials_list = get_settings_lists()
 workers = get_worker_list()
 current_stock = calculate_stock()
 
-# --- TAB 1: LOG WORK (REORGANIZED) ---
+# --- TAB 1: LOG WORK ---
 with tabs[0]:
     st.subheader("Daily Activity Log")
     
     with st.form("work_log", clear_on_submit=True):
-        # Row 1: Date & Site
         c_top1, c_top2 = st.columns(2)
         w_date = c_top1.date_input("Date", datetime.today())
         w_site = c_top2.selectbox("Site Name", sites_list)
         
-        # Row 2: Worker (Critical Info)
         w_worker = st.selectbox("Installer / Worker", workers)
         
-        # Row 3: Cable & Lugs (Moved Up)
         st.markdown("---")
         st.caption("🛠️ Material Consumption")
         c_mat1, c_mat2 = st.columns(2)
         qty_cable = c_mat1.number_input("Cable Used (Mtrs)", min_value=0.0, step=1.0)
         qty_lugs = c_mat2.number_input("Lugs Used (Qty)", min_value=0.0, step=1.0)
         
-        # Row 4: Asset Details
         st.markdown("---")
         st.caption("📍 Installation Details")
         c_asset1, c_asset2 = st.columns(2)
@@ -193,7 +179,7 @@ with tabs[0]:
             batch_rows = []
             base_row = [str(w_date), w_dtr, w_site, w_worker]
             
-            # Auto-Deduct Box (Logic remains, message removed)
+            # Logic: Auto-Deduct Box
             box_name = f"{w_meter_type} Box"
             batch_rows.append([str(uuid.uuid4())] + base_row + [box_name, 1, "FALSE"])
             
@@ -210,21 +196,16 @@ with tabs[0]:
             except Exception as e:
                 st.error(f"Save Failed: {e}")
 
-# --- TAB 2: INVENTORY (ALL ITEMS SHOWN) ---
+# --- TAB 2: INVENTORY ---
 with tabs[1]:
     st.subheader("📊 Stock Overview")
     
     if current_stock:
-        # Sort items: Put low stock first for alerts
         sorted_stock = sorted(current_stock.items(), key=lambda x: x[1])
-        
-        # Create a grid layout
         cols = st.columns(3)
         for i, (item, qty) in enumerate(sorted_stock):
-            # Color logic: Red if < 10, else Green
             color = "normal"
-            if qty < 10: color = "inverse" # Highlights low stock
-            
+            if qty < 10: color = "inverse"
             with cols[i % 3]:
                 st.metric(label=item, value=f"{qty:,.0f}", delta="Low" if qty<10 else None, delta_color=color)
     else:
@@ -252,11 +233,10 @@ with tabs[1]:
             time.sleep(1)
             st.rerun()
 
-# --- TAB 3: WORKERS (EDITABLE LIST) ---
+# --- TAB 3: WORKERS ---
 with tabs[2]:
     st.subheader("👥 Worker Management")
     
-    # 1. Add New
     with st.expander("➕ Add New Worker"):
         with st.form("add_worker"):
             new_w = st.text_input("Worker Name")
@@ -269,22 +249,17 @@ with tabs[2]:
                 elif new_w in workers:
                     st.warning("Worker already exists")
 
-    # 2. View & Edit Existing
     st.markdown("##### Existing Workers")
     df_workers = get_data("Workers")
     
     if not df_workers.empty:
-        # Use Data Editor for easy editing
         edited_workers = st.data_editor(
             df_workers,
             num_rows="dynamic",
             use_container_width=True,
             key="worker_editor",
-            column_config={
-                "Synced": st.column_config.Column(disabled=True) # Prevent editing sync status
-            }
+            column_config={"Synced": st.column_config.Column(disabled=True)}
         )
-        
         if st.button("💾 Save Worker Changes"):
             update_worker_registry(edited_workers)
             st.success("Worker list updated!")
@@ -293,7 +268,7 @@ with tabs[2]:
     else:
         st.info("No workers found.")
 
-# --- TAB 4: VIEW & MANAGE (MULTI-SELECT DELETE) ---
+# --- TAB 4: VIEW & MANAGE (FIXED) ---
 with tabs[3]:
     st.subheader("🗂️ Data Management")
     view_mode = st.radio("Select Data Source", ["Work Logs", "Inventory Logs"], horizontal=True, label_visibility="collapsed")
@@ -302,44 +277,36 @@ with tabs[3]:
         clear_cache()
         st.rerun()
 
-    # Determine which sheet to load
     target_sheet = "WorkLogs" if view_mode == "Work Logs" else "Inventory"
     df = get_data(target_sheet)
 
     if not df.empty:
-        # Sort by Date Descending
         if 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
             df = df.sort_values(by='Date', ascending=False)
-            df['Date'] = df['Date'].dt.strftime('%Y-%m-%d') # Format back to string
+            df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
 
-        # MULTI-SELECT DATAFRAME
-        st.info("💡 Select rows using the checkboxes on the left to delete them.")
+        st.info("💡 Select rows to delete.")
         
-        # Configure columns: Hide ID, Make others readable
-        cols_config = {
-            "ID": st.column_config.Column(hidden=True),
-            "Synced": st.column_config.Column(hidden=True)
-        }
+        # FIX: We drop ID and Synced for display, but map selection back to original DF
+        display_cols = [c for c in df.columns if c not in ["ID", "Synced"]]
         
         event = st.dataframe(
-            df,
+            df[display_cols],
             on_select="rerun",
             selection_mode="multi-row",
             use_container_width=True,
-            column_config=cols_config,
             height=400
         )
         
-        # DELETE LOGIC
         if event.selection.rows:
             selected_indices = event.selection.rows
+            # Map display indices back to original DF IDs
             selected_ids = df.iloc[selected_indices]['ID'].tolist()
             count = len(selected_ids)
             
             st.error(f"⚠️ You have selected {count} records.")
             
-            # TWO-STEP CONFIRMATION
             if st.button(f"🗑️ Permanently Delete {count} Record(s)?"):
                 with st.spinner("Deleting..."):
                     if bulk_delete_rows(target_sheet, selected_ids):
