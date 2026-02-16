@@ -142,7 +142,8 @@ with c_head1:
 with c_head2:
     st.title("Site Supervisor")
 
-tabs = st.tabs(["📝 Work Logs", "📦 Inventory", "👥 Workers", "📊 View & Manage"])
+# --- UPDATED TAB ORDER ---
+tabs = st.tabs(["📝 Work Logs", "📊 View & Manage", "📦 Inventory", "👥 Workers"])
 
 sites_list, meter_types_list, materials_list = get_settings_lists()
 workers = get_worker_list()
@@ -156,7 +157,7 @@ with tabs[0]:
     # Logic: Check if DTR is selected
     is_dtr = "DTR" in w_meter_type.upper()
     
-    # Label changes dynamically for the User
+    # Label changes dynamically
     id_label = "DTR Code" if is_dtr else "Service Number"
     
     with st.form("work_log", clear_on_submit=True):
@@ -168,10 +169,8 @@ with tabs[0]:
         w_worker = c3.selectbox("Worker", workers)
         
         c4, c5 = st.columns(2)
-        # This input captures the Main ID (Service No OR DTR Code)
         w_main_id = c4.text_input(id_label) 
         
-        # Optional Fields
         w_dtr_box = ""
         w_ss_no = ""
         w_capacity = ""
@@ -192,11 +191,10 @@ with tabs[0]:
         if st.form_submit_button("🚀 Submit Log", type="primary", use_container_width=True):
             batch_rows = []
             
-            # --- ROW STRUCTURE UPDATE ---
-            # Column 3 is now "SC No/ DTR Code"
+            # SC No / DTR Code Logic
             base_row = [
                 str(w_date),
-                w_main_id,    # Goes into "SC No/ DTR Code"
+                w_main_id,    # Into SC No/ DTR Code
                 w_dtr_box,
                 w_ss_no,
                 w_capacity,
@@ -220,54 +218,8 @@ with tabs[0]:
             except Exception as e:
                 st.error(f"Save Failed: {e}")
 
-# --- TAB 2: INVENTORY ---
+# --- TAB 2: VIEW & MANAGE (Moved Here) ---
 with tabs[1]:
-    st.subheader("📊 Stock Overview")
-    if current_stock:
-        sorted_stock = sorted(current_stock.items(), key=lambda x: x[1])
-        cols = st.columns(3)
-        for i, (item, qty) in enumerate(sorted_stock):
-            color = "normal" if qty >= 10 else "inverse"
-            with cols[i % 3]:
-                st.metric(label=item, value=f"{qty:,.0f}", delta="Low" if qty<10 else None, delta_color=color)
-    else:
-        st.info("No stock data.")
-
-    st.markdown("---")
-    with st.form("inv_form", clear_on_submit=True):
-        st.caption("📥 Add New Stock")
-        c1, c2, c3 = st.columns([1, 1, 1])
-        i_date = c1.date_input("Date", datetime.today())
-        i_mat = c2.selectbox("Material", materials_list)
-        i_qty = c3.number_input("Qty", min_value=0.0, step=1.0)
-        
-        if st.form_submit_button("Add Stock", use_container_width=True):
-            payload = {"ID": str(uuid.uuid4()), "Date": str(i_date), "Material": i_mat, "Qty": i_qty, "Type": "Inward", "Synced": "FALSE"}
-            save_row("Inventory", payload)
-            st.toast(f"✅ Added {i_qty} {i_mat}")
-            time.sleep(1)
-            st.rerun()
-
-# --- TAB 3: WORKERS ---
-with tabs[2]:
-    st.subheader("👥 Workers")
-    with st.expander("➕ Add Worker"):
-        with st.form("add_worker"):
-            new_w = st.text_input("Name")
-            if st.form_submit_button("Add"):
-                if new_w and new_w not in workers:
-                    save_row("Workers", {"Name": new_w, "Synced": "FALSE"})
-                    st.rerun()
-    
-    df_workers = get_data("Workers")
-    if not df_workers.empty:
-        edited = st.data_editor(df_workers, use_container_width=True, num_rows="dynamic", key="w_edit", column_config={"Synced": st.column_config.Column(disabled=True)})
-        if st.button("💾 Save List"):
-            update_worker_registry(edited)
-            st.rerun()
-
-# --- TAB 4: MANAGE ---
-with tabs[3]:
     st.subheader("🗂️ Manage Data")
     view_mode = st.radio("Source", ["Work Logs", "Inventory"], horizontal=True, label_visibility="collapsed")
     
@@ -296,7 +248,6 @@ with tabs[3]:
         
         # Create Label
         if target_sheet == "WorkLogs":
-            # --- UPDATED COLUMN NAME ---
             s_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in df.columns else df.columns[2]
             df['label'] = df['Date'] + " | " + df[s_col].astype(str) + " | " + df['Material']
         else:
@@ -314,7 +265,6 @@ with tabs[3]:
                     n_site = st.selectbox("Site", sites_list, index=sites_list.index(sel_row['Site']) if sel_row['Site'] in sites_list else 0)
                     n_worker = st.selectbox("Worker", workers, index=workers.index(sel_row['Worker']) if sel_row['Worker'] in workers else 0)
                     
-                    # --- UPDATED COLUMN NAME HERE ---
                     col_name = 'SC No/ DTR Code'
                     n_id = st.text_input("SC No / DTR Code", value=sel_row.get(col_name, ''))
                     
@@ -328,7 +278,6 @@ with tabs[3]:
                 if st.form_submit_button("💾 Save"):
                     u_data = {"Date": n_date, "Material": n_mat, "Qty": n_qty, "Synced": "FALSE"}
                     if target_sheet == "WorkLogs":
-                        # --- UPDATED MAPPING ---
                         u_data.update({
                             "Site": n_site, 
                             "Worker": n_worker, 
@@ -340,3 +289,49 @@ with tabs[3]:
                     
                     if update_row_data(target_sheet, sel_row['ID'], u_data):
                         st.success("Updated!"); time.sleep(1); st.rerun()
+
+# --- TAB 3: INVENTORY ---
+with tabs[2]:
+    st.subheader("📊 Stock Overview")
+    if current_stock:
+        sorted_stock = sorted(current_stock.items(), key=lambda x: x[1])
+        cols = st.columns(3)
+        for i, (item, qty) in enumerate(sorted_stock):
+            color = "normal" if qty >= 10 else "inverse"
+            with cols[i % 3]:
+                st.metric(label=item, value=f"{qty:,.0f}", delta="Low" if qty<10 else None, delta_color=color)
+    else:
+        st.info("No stock data.")
+
+    st.markdown("---")
+    with st.form("inv_form", clear_on_submit=True):
+        st.caption("📥 Add New Stock")
+        c1, c2, c3 = st.columns([1, 1, 1])
+        i_date = c1.date_input("Date", datetime.today())
+        i_mat = c2.selectbox("Material", materials_list)
+        i_qty = c3.number_input("Qty", min_value=0.0, step=1.0)
+        
+        if st.form_submit_button("Add Stock", use_container_width=True):
+            payload = {"ID": str(uuid.uuid4()), "Date": str(i_date), "Material": i_mat, "Qty": i_qty, "Type": "Inward", "Synced": "FALSE"}
+            save_row("Inventory", payload)
+            st.toast(f"✅ Added {i_qty} {i_mat}")
+            time.sleep(1)
+            st.rerun()
+
+# --- TAB 4: WORKERS ---
+with tabs[3]:
+    st.subheader("👥 Workers")
+    with st.expander("➕ Add Worker"):
+        with st.form("add_worker"):
+            new_w = st.text_input("Name")
+            if st.form_submit_button("Add"):
+                if new_w and new_w not in workers:
+                    save_row("Workers", {"Name": new_w, "Synced": "FALSE"})
+                    st.rerun()
+    
+    df_workers = get_data("Workers")
+    if not df_workers.empty:
+        edited = st.data_editor(df_workers, use_container_width=True, num_rows="dynamic", key="w_edit", column_config={"Synced": st.column_config.Column(disabled=True)})
+        if st.button("💾 Save List"):
+            update_worker_registry(edited)
+            st.rerun()
