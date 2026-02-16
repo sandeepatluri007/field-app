@@ -180,39 +180,51 @@ sites_list, meter_types_list, materials_list = get_settings_lists()
 workers = get_worker_list()
 current_stock = calculate_stock()
 
-# --- TAB 1: LOG WORK (UPDATED LAYOUT) ---
+# --- TAB 1: LOG WORK (UPDATED COMPACT LAYOUT) ---
 with tabs[0]:
-    st.subheader("Daily Activity Log")
+    # st.subheader("Daily Activity Log") # Removed to save space
     
     with st.form("work_log", clear_on_submit=True):
-        # Row 1: Date & Site
-        c_top1, c_top2 = st.columns(2)
-        w_date = c_top1.date_input("Date", datetime.today())
-        w_site = c_top2.selectbox("Site Name", sites_list)
         
-        # Row 2: Worker
-        w_worker = st.selectbox("Installer / Worker", workers)
+        # Section 1: Basic Info (Compact Row)
+        c1, c2, c3 = st.columns([1, 1, 1])
+        w_date = c1.date_input("Date", datetime.today())
+        w_site = c2.selectbox("Site Name", sites_list)
+        w_worker = c3.selectbox("Installer / Worker", workers)
         
-        # Row 3: Asset Details (MOVED UP)
-        st.markdown("---")
-        st.caption("📍 Installation Details")
-        c_asset1, c_asset2 = st.columns(2)
-        w_meter_type = c_asset1.selectbox("Meter/Box Type", meter_types_list)
-        w_dtr = c_asset2.text_input("DTR Code / ID")
+        # Section 2: Installation Details (Compact Grid)
+        c4, c5, c6 = st.columns(3)
+        w_meter_type = c4.selectbox("Meter/Box Type", meter_types_list)
+        w_dtr = c5.text_input("DTR Code")
+        w_dtr_box = c6.text_input("DTR Box No")
         
-        # Row 4: Material Consumption (MOVED DOWN)
-        st.markdown("---")
-        st.caption("🛠️ Material Consumption")
-        c_mat1, c_mat2 = st.columns(2)
-        qty_cable = c_mat1.number_input("Cable Used (Mtrs)", min_value=0.0, step=1.0)
-        qty_lugs = c_mat2.number_input("Lugs Used (Qty)", min_value=0.0, step=1.0)
+        c7, c8 = st.columns(2)
+        w_ss_no = c7.text_input("Transformer SS No")
+        w_kva = c8.text_input("Transformer Capacity (KVA)")
+
+        # Section 3: Materials (Compact Row)
+        c9, c10 = st.columns(2)
+        qty_cable = c9.number_input("Cable Used (Mtrs)", min_value=0.0, step=1.0)
+        qty_lugs = c10.number_input("Lugs Used (Qty)", min_value=0.0, step=1.0)
         
         if st.form_submit_button("🚀 Submit Log", type="primary", use_container_width=True):
             batch_rows = []
-            base_row = [str(w_date), w_dtr, w_site, w_worker]
+            
+            # --- ROW STRUCTURE UPDATE ---
+            # Must match Sheets Order: [Date, DTR Code, DTR Box, SS No, KVA, Site, Worker]
+            base_row = [
+                str(w_date), 
+                w_dtr, 
+                w_dtr_box, 
+                w_ss_no, 
+                w_kva, 
+                w_site, 
+                w_worker
+            ]
             
             # Logic: Auto-Deduct Box
             box_name = f"{w_meter_type} Box"
+            # Append [ID] + Base Info + [Material, Qty, Synced]
             batch_rows.append([str(uuid.uuid4())] + base_row + [box_name, 1, "FALSE"])
             
             if qty_cable > 0:
@@ -300,7 +312,7 @@ with tabs[2]:
     else:
         st.info("No workers found.")
 
-# --- TAB 4: VIEW & MANAGE (EDIT & DELETE RESTORED) ---
+# --- TAB 4: VIEW & MANAGE ---
 with tabs[3]:
     st.subheader("🗂️ Data Management")
     view_mode = st.radio("Select Data Source", ["Work Logs", "Inventory Logs"], horizontal=True, label_visibility="collapsed")
@@ -344,9 +356,8 @@ with tabs[3]:
         st.markdown("---")
         st.markdown("### ✏️ Edit Record")
         
-        # Create a dropdown for record selection (easier on mobile than table clicking)
-        # Label format: Date | Site | Item (Qty)
         if target_sheet == "WorkLogs":
+            # Update label to show site/worker info for context
             df['label'] = df['Date'] + " | " + df['Site'] + " | " + df['Material'] + " (" + df['Qty'].astype(str) + ")"
         else:
             df['label'] = df['Date'] + " | " + df['Material'] + " (" + df['Qty'].astype(str) + ")"
@@ -364,9 +375,12 @@ with tabs[3]:
                 new_date = st.text_input("Date (YYYY-MM-DD)", value=sel_row['Date'])
                 
                 if target_sheet == "WorkLogs":
+                    # Added new fields to Edit mode as well
                     new_site = st.selectbox("Site", sites_list, index=sites_list.index(sel_row['Site']) if sel_row['Site'] in sites_list else 0)
                     new_worker = st.selectbox("Worker", workers, index=workers.index(sel_row['Worker']) if sel_row['Worker'] in workers else 0)
                     new_dtr = st.text_input("DTR Code", value=sel_row.get('DTR Code', ''))
+                    # Note: You can add the new fields (Box, SS, Capacity) here if needed for editing, 
+                    # but ensure they exist in the DF first to avoid key errors on old data.
                 
                 new_mat = st.selectbox("Material", materials_list, index=materials_list.index(sel_row['Material']) if sel_row['Material'] in materials_list else 0)
                 new_qty = st.number_input("Qty", value=float(sel_row['Qty']))
