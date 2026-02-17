@@ -7,6 +7,13 @@ import uuid
 import time
 import os
 
+# --- NEW IMPORT FOR GPS ---
+try:
+    from streamlit_js_eval import get_geolocation
+except ImportError:
+    st.error("⚠️ Please run: pip install streamlit_js_eval")
+    get_geolocation = None
+
 # --- CONFIGURATION ---
 SHEET_NAME = "Smart_Infra_DB"
 LOGO_FILE = "logodesign4.jpg"
@@ -20,7 +27,7 @@ def get_connection():
             creds_dict = dict(st.secrets["gcp_service_account"])
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
-            st.error("⚠️ Secrets not found.")
+            st.error("⚠️ Secrets not found. Please configure .streamlit/secrets.toml")
             st.stop()
         return gspread.authorize(creds)
     except Exception as e:
@@ -142,6 +149,7 @@ with c_head1:
 with c_head2:
     st.title("Site Supervisor")
 
+# --- TAB NAVIGATION ---
 tabs = st.tabs(["📝 Work Logs", "📊 View & Manage", "📦 Inventory", "👥 Workers"])
 
 sites_list, meter_types_list, materials_list = get_settings_lists()
@@ -153,9 +161,21 @@ with tabs[0]:
     st.markdown("##### 1. Asset Type")
     w_meter_type = st.selectbox("Select Installation Type:", meter_types_list)
 
-    # Logic: Check if DTR is selected
     is_dtr = "DTR" in w_meter_type.upper()
     id_label = "DTR Code" if is_dtr else "Service Number"
+    
+    # --- GPS AUTO-CAPTURE (OUTSIDE FORM) ---
+    st.markdown("##### 📍 Location")
+    auto_lat, auto_long = "", ""
+    
+    # Use a checkbox to trigger GPS fetch (acts like a toggle button)
+    if get_geolocation:
+        if st.checkbox("📍 Capture GPS Automatically", help="Check this to fetch current location"):
+            geo_data = get_geolocation(component_key='gps_capture')
+            if geo_data:
+                auto_lat = str(geo_data['coords']['latitude'])
+                auto_long = str(geo_data['coords']['longitude'])
+                st.success(f"Captured: {auto_lat}, {auto_long}")
     
     with st.form("work_log", clear_on_submit=True):
         st.markdown("##### 2. Installation Details")
@@ -185,20 +205,19 @@ with tabs[0]:
         qty_cable = c_mat1.number_input("Cable (Mtrs)", min_value=0.0, step=1.0)
         qty_lugs = c_mat2.number_input("Lugs (Qty)", min_value=0.0, step=1.0)
         
-        # --- NEW: GPS CAPTURE ---
-        st.markdown("##### 4. Location (Optional)")
+        # Hidden inputs to capture the auto-filled GPS (user can still edit if needed)
+        # We use text_input so it can be submitted with the form
+        st.caption("Coordinates (Auto-filled if 'Capture GPS' is checked)")
         c_lat, c_long = st.columns(2)
-        w_lat = c_lat.text_input("Latitude", placeholder="e.g. 17.3850")
-        w_long = c_long.text_input("Longitude", placeholder="e.g. 78.4867")
-        st.caption("Tip: Use a GPS app to copy coords or share location to WhatsApp to get numbers.")
+        w_lat = c_lat.text_input("Latitude", value=auto_lat)
+        w_long = c_long.text_input("Longitude", value=auto_long)
 
         if st.form_submit_button("🚀 Submit Log", type="primary", use_container_width=True):
             batch_rows = []
             
-            # --- ROW STRUCTURE UPDATE (Includes Lat/Long) ---
+            # --- ROW STRUCTURE (Matches Google Sheet) ---
             # Order: [Date, SC No/ DTR Code, DTR_Box_No, SS No, Capacity, Site, Worker, Material, Qty, Latitude, Longitude, Synced]
             
-            # Common metadata for all rows in this batch
             meta_data = [
                 str(w_date),
                 w_main_id,    # SC No/ DTR Code
@@ -209,7 +228,6 @@ with tabs[0]:
                 w_worker
             ]
             
-            # GPS Data for all rows
             gps_data = [w_lat, w_long]
             
             # 1. Box Row
@@ -239,7 +257,7 @@ with tabs[1]:
     # Sub-tabs for Data Views
     t_view_logs, t_gps, t_inv_view = st.tabs(["📋 Installation Logs", "📍 GPS Data", "📦 Inventory Logs"])
     
-    # --- 1. CONSOLIDATED LOGS VIEW ---
+    # --- 1. CONSOLIDATED LOGS VIEW (Single Entry Logic) ---
     with t_view_logs:
         if st.button("🔄 Refresh Data", key="ref_logs"): clear_cache(); st.rerun()
         
@@ -270,30 +288,24 @@ with tabs[1]:
             if sel_worker != "All":
                 filtered_df = filtered_df[filtered_df['Worker'] == sel_worker]
             if len(sel_date) == 2:
-                # Ensure date column is datetime
                 mask = (filtered_df['Date'].dt.date >= sel_date[0]) & (filtered_df['Date'].dt.date <= sel_date[1])
                 filtered_df = filtered_df[mask]
                 
             # --- CONSOLIDATION LOGIC ---
             if not filtered_df.empty:
-                # Format Date for display
                 filtered_df['DateStr'] = filtered_df['Date'].dt.strftime('%Y-%m-%d')
-                
-                # Identify the ID Column dynamically
                 id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in filtered_df.columns else filtered_df.columns[2]
                 
-                # Create a description for each row: "Material (Qty)"
+                # Create a concise material string
                 filtered_df['ItemDesc'] = filtered_df['Material'] + " (" + filtered_df['Qty'].astype(str) + ")"
                 
-                # Group By key identifiers to merge materials
-                # We group by ID, Date, Site, Worker (and GPS if we want)
+                # Group items by ID to show as one entry
                 grouped = filtered_df.groupby([id_col, 'DateStr', 'Site', 'Worker']).agg({
-                    'ItemDesc': lambda x: ', '.join(x),
-                    'ID': 'first' # Keep one ID for reference
+                    'ItemDesc': lambda x: ', '.join(x), # Merges "Box (1), Cable (10)"
+                    'ID': 'first' 
                 }).reset_index()
                 
-                # Rename for clarity
-                grouped.columns = ['ID / Code', 'Date', 'Site', 'Worker', 'Consolidated Materials', 'Ref_ID']
+                grouped.columns = ['ID / Code', 'Date', 'Site', 'Worker', 'Materials Consumed', 'Ref_ID']
                 
                 st.dataframe(grouped.drop(columns=['Ref_ID']), use_container_width=True)
             else:
@@ -307,21 +319,16 @@ with tabs[1]:
         df_gps = get_data("WorkLogs")
         
         if not df_gps.empty and 'Latitude' in df_gps.columns:
-            # Filter rows that actually have GPS data
+            # Filter rows with GPS data
             gps_valid = df_gps[df_gps['Latitude'].astype(str).str.strip() != ""].copy()
             
             if not gps_valid.empty:
-                # Deduplicate based on Installation ID (we don't need 3 rows for Box/Cable/Lugs for same location)
                 id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in gps_valid.columns else gps_valid.columns[2]
                 gps_unique = gps_valid.drop_duplicates(subset=[id_col])
                 
-                # Display Table
                 st.dataframe(gps_unique[[id_col, 'Site', 'Latitude', 'Longitude']], use_container_width=True)
                 
-                # WhatsApp Export Generator
                 st.markdown("#### 📤 Export Location")
-                
-                # Let user pick a location to share
                 gps_unique['label'] = gps_unique[id_col].astype(str) + " - " + gps_unique['Site']
                 sel_loc = st.selectbox("Select Location to Share", gps_unique['label'].tolist())
                 
@@ -330,25 +337,22 @@ with tabs[1]:
                     lat = row['Latitude']
                     lon = row['Longitude']
                     
-                    # Create WhatsApp Link
-                    # Format: https://wa.me/?text=Location%20Name%20https://maps.google.com/?q=lat,lon
-                    maps_link = f"https://maps.google.com/?q={lat},{lon}"
+                    # WhatsApp Link
+                    maps_link = f"http://maps.google.com/?q={lat},{lon}"
                     text = f"📍 Location for {row[id_col]}: {maps_link}"
                     
-                    # Streamlit link button
                     st.link_button(f"📱 Share {row[id_col]} on WhatsApp", f"https://wa.me/?text={text}")
             else:
                 st.info("No GPS data recorded yet.")
         else:
             st.warning("GPS columns not found in Sheet. Please update header row.")
 
-    # --- 3. INVENTORY LOGS (Original Logic) ---
+    # --- 3. INVENTORY LOGS ---
     with t_inv_view:
         df_inv = get_data("Inventory")
         if not df_inv.empty:
             st.dataframe(df_inv, use_container_width=True)
             
-            # Edit/Delete Logic for Inventory
             st.markdown("---")
             st.write("### ✏️ Edit Inventory Record")
             df_inv['label'] = df_inv['Date'].astype(str) + " | " + df_inv['Material'] + " (" + df_inv['Qty'].astype(str) + ")"
