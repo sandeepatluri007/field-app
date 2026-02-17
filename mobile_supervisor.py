@@ -142,7 +142,6 @@ with c_head1:
 with c_head2:
     st.title("Site Supervisor")
 
-# --- UPDATED TAB ORDER ---
 tabs = st.tabs(["📝 Work Logs", "📊 View & Manage", "📦 Inventory", "👥 Workers"])
 
 sites_list, meter_types_list, materials_list = get_settings_lists()
@@ -156,8 +155,6 @@ with tabs[0]:
 
     # Logic: Check if DTR is selected
     is_dtr = "DTR" in w_meter_type.upper()
-    
-    # Label changes dynamically
     id_label = "DTR Code" if is_dtr else "Service Number"
     
     with st.form("work_log", clear_on_submit=True):
@@ -188,13 +185,23 @@ with tabs[0]:
         qty_cable = c_mat1.number_input("Cable (Mtrs)", min_value=0.0, step=1.0)
         qty_lugs = c_mat2.number_input("Lugs (Qty)", min_value=0.0, step=1.0)
         
+        # --- NEW: GPS CAPTURE ---
+        st.markdown("##### 4. Location (Optional)")
+        c_lat, c_long = st.columns(2)
+        w_lat = c_lat.text_input("Latitude", placeholder="e.g. 17.3850")
+        w_long = c_long.text_input("Longitude", placeholder="e.g. 78.4867")
+        st.caption("Tip: Use a GPS app to copy coords or share location to WhatsApp to get numbers.")
+
         if st.form_submit_button("🚀 Submit Log", type="primary", use_container_width=True):
             batch_rows = []
             
-            # SC No / DTR Code Logic
-            base_row = [
+            # --- ROW STRUCTURE UPDATE (Includes Lat/Long) ---
+            # Order: [Date, SC No/ DTR Code, DTR_Box_No, SS No, Capacity, Site, Worker, Material, Qty, Latitude, Longitude, Synced]
+            
+            # Common metadata for all rows in this batch
+            meta_data = [
                 str(w_date),
-                w_main_id,    # Into SC No/ DTR Code
+                w_main_id,    # SC No/ DTR Code
                 w_dtr_box,
                 w_ss_no,
                 w_capacity,
@@ -202,13 +209,20 @@ with tabs[0]:
                 w_worker
             ]
             
-            box_item_name = f"{w_meter_type} Box"
-            batch_rows.append([str(uuid.uuid4())] + base_row + [box_item_name, 1, "FALSE"])
+            # GPS Data for all rows
+            gps_data = [w_lat, w_long]
             
+            # 1. Box Row
+            box_item_name = f"{w_meter_type} Box"
+            batch_rows.append([str(uuid.uuid4())] + meta_data + [box_item_name, 1] + gps_data + ["FALSE"])
+            
+            # 2. Cable Row
             if qty_cable > 0:
-                batch_rows.append([str(uuid.uuid4())] + base_row + ["Cable", qty_cable, "FALSE"])
+                batch_rows.append([str(uuid.uuid4())] + meta_data + ["Cable", qty_cable] + gps_data + ["FALSE"])
+            
+            # 3. Lugs Row
             if qty_lugs > 0:
-                batch_rows.append([str(uuid.uuid4())] + base_row + ["Lugs", qty_lugs, "FALSE"])
+                batch_rows.append([str(uuid.uuid4())] + meta_data + ["Lugs", qty_lugs] + gps_data + ["FALSE"])
             
             try:
                 save_batch_rows("WorkLogs", batch_rows)
@@ -218,79 +232,141 @@ with tabs[0]:
             except Exception as e:
                 st.error(f"Save Failed: {e}")
 
-# --- TAB 2: VIEW & MANAGE (Moved Here) ---
+# --- TAB 2: VIEW & MANAGE ---
 with tabs[1]:
-    st.subheader("🗂️ Manage Data")
-    view_mode = st.radio("Source", ["Work Logs", "Inventory"], horizontal=True, label_visibility="collapsed")
+    st.subheader("🗂️ Data Management")
     
-    if st.button("🔄 Refresh"): clear_cache(); st.rerun()
-
-    target_sheet = "WorkLogs" if view_mode == "Work Logs" else "Inventory"
-    df = get_data(target_sheet)
-
-    if not df.empty:
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-            df = df.sort_values(by='Date', ascending=False)
-
-        # Multi-Delete
-        display_cols = [c for c in df.columns if c not in ["ID", "Synced"]]
-        event = st.dataframe(df[display_cols], on_select="rerun", selection_mode="multi-row", use_container_width=True, height=300)
+    # Sub-tabs for Data Views
+    t_view_logs, t_gps, t_inv_view = st.tabs(["📋 Installation Logs", "📍 GPS Data", "📦 Inventory Logs"])
+    
+    # --- 1. CONSOLIDATED LOGS VIEW ---
+    with t_view_logs:
+        if st.button("🔄 Refresh Data", key="ref_logs"): clear_cache(); st.rerun()
         
-        if event.selection.rows:
-            ids = df.iloc[event.selection.rows]['ID'].tolist()
-            if st.button(f"🗑️ Delete {len(ids)} Items"):
-                if bulk_delete_rows(target_sheet, ids): st.rerun()
-
-        # Edit Record
-        st.markdown("---")
-        st.write("### ✏️ Edit Record")
-        
-        # Create Label
-        if target_sheet == "WorkLogs":
-            s_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in df.columns else df.columns[2]
-            df['label'] = df['Date'] + " | " + df[s_col].astype(str) + " | " + df['Material']
+        df = get_data("WorkLogs")
+        if not df.empty:
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            
+            # --- FILTERS ---
+            st.markdown("###### Filters")
+            c_f1, c_f2, c_f3 = st.columns(3)
+            
+            # Site Filter
+            avail_sites = ["All"] + sorted(df['Site'].dropna().unique().tolist())
+            sel_site = c_f1.selectbox("Site", avail_sites, key="fil_site")
+            
+            # Worker Filter
+            avail_workers = ["All"] + sorted(df['Worker'].dropna().unique().tolist())
+            sel_worker = c_f2.selectbox("Worker", avail_workers, key="fil_worker")
+            
+            # Date Filter
+            sel_date = c_f3.date_input("Date", [])
+            
+            # Apply Filters
+            filtered_df = df.copy()
+            if sel_site != "All":
+                filtered_df = filtered_df[filtered_df['Site'] == sel_site]
+            if sel_worker != "All":
+                filtered_df = filtered_df[filtered_df['Worker'] == sel_worker]
+            if len(sel_date) == 2:
+                # Ensure date column is datetime
+                mask = (filtered_df['Date'].dt.date >= sel_date[0]) & (filtered_df['Date'].dt.date <= sel_date[1])
+                filtered_df = filtered_df[mask]
+                
+            # --- CONSOLIDATION LOGIC ---
+            if not filtered_df.empty:
+                # Format Date for display
+                filtered_df['DateStr'] = filtered_df['Date'].dt.strftime('%Y-%m-%d')
+                
+                # Identify the ID Column dynamically
+                id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in filtered_df.columns else filtered_df.columns[2]
+                
+                # Create a description for each row: "Material (Qty)"
+                filtered_df['ItemDesc'] = filtered_df['Material'] + " (" + filtered_df['Qty'].astype(str) + ")"
+                
+                # Group By key identifiers to merge materials
+                # We group by ID, Date, Site, Worker (and GPS if we want)
+                grouped = filtered_df.groupby([id_col, 'DateStr', 'Site', 'Worker']).agg({
+                    'ItemDesc': lambda x: ', '.join(x),
+                    'ID': 'first' # Keep one ID for reference
+                }).reset_index()
+                
+                # Rename for clarity
+                grouped.columns = ['ID / Code', 'Date', 'Site', 'Worker', 'Consolidated Materials', 'Ref_ID']
+                
+                st.dataframe(grouped.drop(columns=['Ref_ID']), use_container_width=True)
+            else:
+                st.info("No logs found matching filters.")
         else:
-            df['label'] = df['Date'] + " | " + df['Material'] + " (" + df['Qty'].astype(str) + ")"
+            st.info("No work logs available.")
 
-        edit_sel = st.selectbox("Select Record", [""] + df['label'].tolist())
+    # --- 2. GPS DATA LOG ---
+    with t_gps:
+        st.caption("View and export captured location data.")
+        df_gps = get_data("WorkLogs")
         
-        if edit_sel:
-            sel_row = df[df['label'] == edit_sel].iloc[0]
-            with st.form("edit_form"):
-                st.caption(f"ID: {sel_row['ID']}")
-                n_date = st.text_input("Date", value=sel_row['Date'])
+        if not df_gps.empty and 'Latitude' in df_gps.columns:
+            # Filter rows that actually have GPS data
+            gps_valid = df_gps[df_gps['Latitude'].astype(str).str.strip() != ""].copy()
+            
+            if not gps_valid.empty:
+                # Deduplicate based on Installation ID (we don't need 3 rows for Box/Cable/Lugs for same location)
+                id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in gps_valid.columns else gps_valid.columns[2]
+                gps_unique = gps_valid.drop_duplicates(subset=[id_col])
                 
-                if target_sheet == "WorkLogs":
-                    n_site = st.selectbox("Site", sites_list, index=sites_list.index(sel_row['Site']) if sel_row['Site'] in sites_list else 0)
-                    n_worker = st.selectbox("Worker", workers, index=workers.index(sel_row['Worker']) if sel_row['Worker'] in workers else 0)
-                    
-                    col_name = 'SC No/ DTR Code'
-                    n_id = st.text_input("SC No / DTR Code", value=sel_row.get(col_name, ''))
-                    
-                    n_box = st.text_input("DTR Box No", value=sel_row.get('DTR_Box_No', '')) if 'DTR_Box_No' in df.columns else ""
-                    n_ss = st.text_input("SS No", value=sel_row.get('Transformer_SS_No', '')) if 'Transformer_SS_No' in df.columns else ""
-                    n_cap = st.text_input("Capacity", value=sel_row.get('Transformer_Capacity', '')) if 'Transformer_Capacity' in df.columns else ""
-
-                n_mat = st.selectbox("Material", materials_list, index=materials_list.index(sel_row['Material']) if sel_row['Material'] in materials_list else 0)
-                n_qty = st.number_input("Qty", value=float(sel_row['Qty']))
+                # Display Table
+                st.dataframe(gps_unique[[id_col, 'Site', 'Latitude', 'Longitude']], use_container_width=True)
                 
-                if st.form_submit_button("💾 Save"):
-                    u_data = {"Date": n_date, "Material": n_mat, "Qty": n_qty, "Synced": "FALSE"}
-                    if target_sheet == "WorkLogs":
-                        u_data.update({
-                            "Site": n_site, 
-                            "Worker": n_worker, 
-                            "SC No/ DTR Code": n_id, 
-                            "DTR_Box_No": n_box,
-                            "Transformer_SS_No": n_ss,
-                            "Transformer_Capacity": n_cap
-                        })
+                # WhatsApp Export Generator
+                st.markdown("#### 📤 Export Location")
+                
+                # Let user pick a location to share
+                gps_unique['label'] = gps_unique[id_col].astype(str) + " - " + gps_unique['Site']
+                sel_loc = st.selectbox("Select Location to Share", gps_unique['label'].tolist())
+                
+                if sel_loc:
+                    row = gps_unique[gps_unique['label'] == sel_loc].iloc[0]
+                    lat = row['Latitude']
+                    lon = row['Longitude']
                     
-                    if update_row_data(target_sheet, sel_row['ID'], u_data):
-                        st.success("Updated!"); time.sleep(1); st.rerun()
+                    # Create WhatsApp Link
+                    # Format: https://wa.me/?text=Location%20Name%20https://maps.google.com/?q=lat,lon
+                    maps_link = f"https://maps.google.com/?q={lat},{lon}"
+                    text = f"📍 Location for {row[id_col]}: {maps_link}"
+                    
+                    # Streamlit link button
+                    st.link_button(f"📱 Share {row[id_col]} on WhatsApp", f"https://wa.me/?text={text}")
+            else:
+                st.info("No GPS data recorded yet.")
+        else:
+            st.warning("GPS columns not found in Sheet. Please update header row.")
 
-# --- TAB 3: INVENTORY ---
+    # --- 3. INVENTORY LOGS (Original Logic) ---
+    with t_inv_view:
+        df_inv = get_data("Inventory")
+        if not df_inv.empty:
+            st.dataframe(df_inv, use_container_width=True)
+            
+            # Edit/Delete Logic for Inventory
+            st.markdown("---")
+            st.write("### ✏️ Edit Inventory Record")
+            df_inv['label'] = df_inv['Date'].astype(str) + " | " + df_inv['Material'] + " (" + df_inv['Qty'].astype(str) + ")"
+            edit_sel = st.selectbox("Select Record", [""] + df_inv['label'].tolist())
+            
+            if edit_sel:
+                sel_row = df_inv[df_inv['label'] == edit_sel].iloc[0]
+                with st.form("edit_inv_form"):
+                    n_date = st.text_input("Date", value=sel_row['Date'])
+                    n_mat = st.selectbox("Material", materials_list, index=materials_list.index(sel_row['Material']) if sel_row['Material'] in materials_list else 0)
+                    n_qty = st.number_input("Qty", value=float(sel_row['Qty']))
+                    
+                    if st.form_submit_button("💾 Save Changes"):
+                        u_data = {"Date": n_date, "Material": n_mat, "Qty": n_qty, "Synced": "FALSE"}
+                        if update_row_data("Inventory", sel_row['ID'], u_data):
+                            st.success("Updated!"); time.sleep(1); st.rerun()
+
+# --- TAB 3: INVENTORY (Add Stock) ---
 with tabs[2]:
     st.subheader("📊 Stock Overview")
     if current_stock:
@@ -304,7 +380,7 @@ with tabs[2]:
         st.info("No stock data.")
 
     st.markdown("---")
-    with st.form("inv_form", clear_on_submit=True):
+    with st.form("inv_form_add", clear_on_submit=True):
         st.caption("📥 Add New Stock")
         c1, c2, c3 = st.columns([1, 1, 1])
         i_date = c1.date_input("Date", datetime.today())
