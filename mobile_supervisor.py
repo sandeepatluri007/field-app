@@ -7,12 +7,18 @@ import uuid
 import time
 import os
 
-# --- NEW IMPORT FOR GPS ---
+# --- NEW IMPORTS ---
 try:
     from streamlit_js_eval import get_geolocation
 except ImportError:
     st.error("⚠️ Please run: pip install streamlit_js_eval")
     get_geolocation = None
+
+try:
+    from fpdf import FPDF
+except ImportError:
+    st.error("⚠️ Please run: pip install fpdf")
+    FPDF = None
 
 # --- CONFIGURATION ---
 SHEET_NAME = "Smart_Infra_DB"
@@ -139,6 +145,31 @@ def calculate_stock():
             stock[mat] = stock.get(mat, 0.0) - qty
     return stock
 
+def generate_survey_pdf(df_export):
+    """Generates PDF for Survey Logs export"""
+    if FPDF is None: return None
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="Survey Logs Export", ln=True, align='C')
+    pdf.ln(5)
+    
+    for _, row in df_export.iterrows():
+        dtr_name = str(row.get('DTR Name', 'N/A'))
+        dtr_code = str(row.get('DTR Code', 'N/A'))
+        lat = str(row.get('Latitude', ''))
+        lon = str(row.get('Longitude', ''))
+        date_val = str(row.get('Date', ''))
+        loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No Location Provided"
+        
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(200, 8, txt=f"DTR: {dtr_name} (Code: {dtr_code}) | Date: {date_val}", ln=True)
+        pdf.set_font("Arial", '', 10)
+        pdf.cell(200, 8, txt=f"Location: {loc_link}", ln=True)
+        pdf.ln(5)
+        
+    return pdf.output(dest='S').encode('latin-1')
+
 # --- UI SETUP ---
 st.set_page_config(page_title="Site Supervisor", page_icon="👷", layout="centered")
 
@@ -149,15 +180,64 @@ with c_head1:
 with c_head2:
     st.title("Site Supervisor")
 
-# --- TAB NAVIGATION ---
-tabs = st.tabs(["📝 Work Logs", "📊 View & Manage", "📦 Inventory", "👥 Workers"])
+# --- TAB NAVIGATION (Survey Tab Added) ---
+tabs = st.tabs(["📋 Survey", "📝 Work Logs", "📊 View & Manage", "📦 Inventory", "👥 Workers"])
 
 sites_list, meter_types_list, materials_list = get_settings_lists()
 workers = get_worker_list()
 current_stock = calculate_stock()
 
-# --- TAB 1: LOG WORK ---
+# Fetch Survey Data globally so it can be used for auto-filling Work Logs
+survey_data = get_data("SurveyLogs")
+
+# --- TAB 0: SURVEY ---
 with tabs[0]:
+    st.markdown("##### 📍 Site Survey Entry")
+    auto_lat_surv, auto_long_surv = "", ""
+    
+    # GPS Auto-capture (Outside form)
+    if get_geolocation:
+        if st.checkbox("📍 Capture GPS Automatically", key="gps_survey_check", help="Check this to fetch current location"):
+            geo_data = get_geolocation(component_key='gps_capture_survey')
+            if geo_data:
+                auto_lat_surv = str(geo_data['coords']['latitude'])
+                auto_long_surv = str(geo_data['coords']['longitude'])
+                st.success(f"Captured: {auto_lat_surv}, {auto_long_surv}")
+                
+    with st.form("survey_log", clear_on_submit=True):
+        s_date = st.date_input("Date", datetime.today())
+        c1, c2 = st.columns(2)
+        s_name = c1.text_input("DTR Name", placeholder="e.g. Main Street Transformer")
+        s_code = c2.text_input("DTR Code", placeholder="e.g. DTR-101")
+        
+        st.caption("Location Coordinates (Auto-filled if 'Capture GPS' is checked)")
+        c_lat, c_long = st.columns(2)
+        s_lat = c_lat.text_input("Latitude", value=auto_lat_surv)
+        s_long = c_long.text_input("Longitude", value=auto_long_surv)
+        
+        if st.form_submit_button("🚀 Submit Survey", type="primary", use_container_width=True):
+            if not s_name or not s_code:
+                st.error("⚠️ DTR Name and DTR Code are required.")
+            else:
+                payload = {
+                    "ID": str(uuid.uuid4()),
+                    "Date": str(s_date),
+                    "DTR Name": s_name,
+                    "DTR Code": s_code,
+                    "Latitude": s_lat,
+                    "Longitude": s_long,
+                    "Synced": "FALSE"
+                }
+                try:
+                    save_row("SurveyLogs", payload)
+                    st.toast("✅ Survey Log Saved!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Save Failed: {e}")
+
+# --- TAB 1: LOG WORK ---
+with tabs[1]:
     st.markdown("##### 1. Asset Type")
     w_meter_type = st.selectbox("Select Installation Type:", meter_types_list)
 
@@ -168,7 +248,6 @@ with tabs[0]:
     st.markdown("##### 📍 Location")
     auto_lat, auto_long = "", ""
     
-    # Use a checkbox to trigger GPS fetch (acts like a toggle button)
     if get_geolocation:
         if st.checkbox("📍 Capture GPS Automatically", help="Check this to fetch current location"):
             geo_data = get_geolocation(component_key='gps_capture')
@@ -199,46 +278,44 @@ with tabs[0]:
             w_capacity = c7.text_input("Transformer Capacity (KVA)")
         else:
             c5.write("")
-        
+            
+        # --- LOGIC: FETCH FROM SURVEY ---
+        surv_lat, surv_lon = "", ""
+        if w_main_id and not survey_data.empty and 'DTR Code' in survey_data.columns:
+            # Case-insensitive match
+            match = survey_data[survey_data['DTR Code'].astype(str).str.lower() == w_main_id.lower()]
+            if not match.empty:
+                surv_lat = str(match.iloc[0].get('Latitude', ''))
+                surv_lon = str(match.iloc[0].get('Longitude', ''))
+                if surv_lat and surv_lon:
+                    st.success(f"✅ Found GPS in Survey for {w_main_id}")
+
         st.markdown("##### 3. Materials")
         c_mat1, c_mat2 = st.columns(2)
         qty_cable = c_mat1.number_input("Cable (Mtrs)", min_value=0.0, step=1.0)
         qty_lugs = c_mat2.number_input("Lugs (Qty)", min_value=0.0, step=1.0)
         
-        # Hidden inputs to capture the auto-filled GPS (user can still edit if needed)
-        # We use text_input so it can be submitted with the form
-        st.caption("Coordinates (Auto-filled if 'Capture GPS' is checked)")
+        st.caption("Coordinates (Auto-filled by Checkbox or Survey Database)")
         c_lat, c_long = st.columns(2)
-        w_lat = c_lat.text_input("Latitude", value=auto_lat)
-        w_long = c_long.text_input("Longitude", value=auto_long)
+        
+        # Priority: 1. Auto GPS 2. Survey DB 3. Empty
+        final_lat_val = auto_lat if auto_lat else surv_lat
+        final_lon_val = auto_long if auto_long else surv_lon
+        
+        w_lat = c_lat.text_input("Latitude", value=final_lat_val)
+        w_long = c_long.text_input("Longitude", value=final_lon_val)
 
         if st.form_submit_button("🚀 Submit Log", type="primary", use_container_width=True):
             batch_rows = []
-            
-            # --- ROW STRUCTURE (Matches Google Sheet) ---
-            # Order: [Date, SC No/ DTR Code, DTR_Box_No, SS No, Capacity, Site, Worker, Material, Qty, Latitude, Longitude, Synced]
-            
             meta_data = [
-                str(w_date),
-                w_main_id,    # SC No/ DTR Code
-                w_dtr_box,
-                w_ss_no,
-                w_capacity,
-                w_site,
-                w_worker
+                str(w_date), w_main_id, w_dtr_box, w_ss_no, w_capacity, w_site, w_worker
             ]
-            
             gps_data = [w_lat, w_long]
             
-            # 1. Box Row
             box_item_name = f"{w_meter_type} Box"
             batch_rows.append([str(uuid.uuid4())] + meta_data + [box_item_name, 1] + gps_data + ["FALSE"])
-            
-            # 2. Cable Row
             if qty_cable > 0:
                 batch_rows.append([str(uuid.uuid4())] + meta_data + ["Cable", qty_cable] + gps_data + ["FALSE"])
-            
-            # 3. Lugs Row
             if qty_lugs > 0:
                 batch_rows.append([str(uuid.uuid4())] + meta_data + ["Lugs", qty_lugs] + gps_data + ["FALSE"])
             
@@ -251,77 +328,148 @@ with tabs[0]:
                 st.error(f"Save Failed: {e}")
 
 # --- TAB 2: VIEW & MANAGE ---
-with tabs[1]:
+with tabs[2]:
     st.subheader("🗂️ Data Management")
     
-    # Sub-tabs for Data Views
-    t_view_logs, t_gps, t_inv_view = st.tabs(["📋 Installation Logs", "📍 GPS Data", "📦 Inventory Logs"])
+    # Sub-tabs for Data Views (Added Survey Logs)
+    t_survey_view, t_view_logs, t_gps, t_inv_view = st.tabs(["📋 Survey Logs", "📋 Installation Logs", "📍 GPS Data", "📦 Inventory Logs"])
     
-    # --- 1. CONSOLIDATED LOGS VIEW (Single Entry Logic) ---
-    with t_view_logs:
-        if st.button("🔄 Refresh Data", key="ref_logs"): clear_cache(); st.rerun()
+    # --- 1. SURVEY LOGS VIEW ---
+    with t_survey_view:
+        if st.button("🔄 Refresh Data", key="ref_surv"): clear_cache(); st.rerun()
         
+        if not survey_data.empty:
+            if 'Date' in survey_data.columns:
+                survey_data['Date'] = pd.to_datetime(survey_data['Date'], errors='coerce')
+            
+            st.markdown("###### Filters")
+            cf1, cf2 = st.columns(2)
+            surv_search = cf1.text_input("Search DTR Code / Name")
+            surv_date = cf2.date_input("Date Range", [])
+            
+            # Apply Filters
+            filtered_surv = survey_data.copy()
+            if surv_search:
+                filtered_surv = filtered_surv[
+                    filtered_surv['DTR Code'].astype(str).str.contains(surv_search, case=False, na=False) |
+                    filtered_surv['DTR Name'].astype(str).str.contains(surv_search, case=False, na=False)
+                ]
+            if len(surv_date) == 2:
+                mask = (filtered_surv['Date'].dt.date >= surv_date[0]) & (filtered_surv['Date'].dt.date <= surv_date[1])
+                filtered_surv = filtered_surv[mask]
+                
+            if not filtered_surv.empty:
+                filtered_surv['Date'] = filtered_surv['Date'].dt.strftime('%Y-%m-%d')
+                display_cols = [c for c in filtered_surv.columns if c not in ["Synced"]]
+                
+                # Multi-Delete Selection
+                evt_surv = st.dataframe(filtered_surv[display_cols], on_select="rerun", selection_mode="multi-row", use_container_width=True)
+                
+                if evt_surv.selection.rows:
+                    sel_surv_ids = filtered_surv.iloc[evt_surv.selection.rows]['ID'].tolist()
+                    if st.button(f"🗑️ Delete {len(sel_surv_ids)} Survey Logs", key="del_surv"):
+                        if bulk_delete_rows("SurveyLogs", sel_surv_ids): st.rerun()
+                        
+                st.markdown("---")
+                
+                # Export & Edit Options
+                ce1, ce2 = st.columns(2)
+                with ce1:
+                    st.write("### ✏️ Edit / Export Record")
+                    filtered_surv['label'] = filtered_surv['Date'].astype(str) + " | " + filtered_surv['DTR Code'].astype(str) + " (" + filtered_surv['DTR Name'].astype(str) + ")"
+                    edit_sel_surv = st.selectbox("Select Record", [""] + filtered_surv['label'].tolist(), key="edit_sel_surv")
+                    
+                    if edit_sel_surv:
+                        sel_row = filtered_surv[filtered_surv['label'] == edit_sel_surv].iloc[0]
+                        with st.form("edit_surv_form"):
+                            st.caption(f"Editing ID: {sel_row['ID']}")
+                            n_date = st.text_input("Date", value=sel_row['Date'])
+                            n_name = st.text_input("DTR Name", value=sel_row['DTR Name'])
+                            n_code = st.text_input("DTR Code", value=sel_row['DTR Code'])
+                            n_lat = st.text_input("Latitude", value=sel_row.get('Latitude', ''))
+                            n_lon = st.text_input("Longitude", value=sel_row.get('Longitude', ''))
+                            
+                            if st.form_submit_button("💾 Save Changes"):
+                                u_data = {"Date": n_date, "DTR Name": n_name, "DTR Code": n_code, "Latitude": n_lat, "Longitude": n_lon, "Synced": "FALSE"}
+                                if update_row_data("SurveyLogs", sel_row['ID'], u_data):
+                                    st.success("Updated!"); time.sleep(1); st.rerun()
+                                    
+                with ce2:
+                    st.write("### 📤 Export Selected")
+                    if edit_sel_surv:
+                        lat = sel_row.get('Latitude', '')
+                        lon = sel_row.get('Longitude', '')
+                        loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No GPS recorded."
+                        msg = f"📍 *Survey Location*\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nLocation: {loc_link}"
+                        
+                        st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={msg}")
+                        
+                    # PDF Export for all filtered rows
+                    st.write("### 📄 Export Full List")
+                    if FPDF:
+                        pdf_data = generate_survey_pdf(filtered_surv)
+                        st.download_button("⬇️ Download as PDF", data=pdf_data, file_name="Survey_Logs.pdf", mime="application/pdf")
+                    else:
+                        st.warning("PDF generator not installed.")
+            else:
+                st.info("No logs match filters.")
+        else:
+            st.info("No Survey Logs available.")
+
+    # --- 2. INSTALLATION LOGS VIEW ---
+    with t_view_logs:
         df = get_data("WorkLogs")
         if not df.empty:
             if 'Date' in df.columns:
                 df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
             
-            # --- FILTERS ---
             st.markdown("###### Filters")
             c_f1, c_f2, c_f3 = st.columns(3)
-            
-            # Site Filter
             avail_sites = ["All"] + sorted(df['Site'].dropna().unique().tolist())
             sel_site = c_f1.selectbox("Site", avail_sites, key="fil_site")
-            
-            # Worker Filter
             avail_workers = ["All"] + sorted(df['Worker'].dropna().unique().tolist())
             sel_worker = c_f2.selectbox("Worker", avail_workers, key="fil_worker")
-            
-            # Date Filter
             sel_date = c_f3.date_input("Date", [])
             
-            # Apply Filters
             filtered_df = df.copy()
-            if sel_site != "All":
-                filtered_df = filtered_df[filtered_df['Site'] == sel_site]
-            if sel_worker != "All":
-                filtered_df = filtered_df[filtered_df['Worker'] == sel_worker]
+            if sel_site != "All": filtered_df = filtered_df[filtered_df['Site'] == sel_site]
+            if sel_worker != "All": filtered_df = filtered_df[filtered_df['Worker'] == sel_worker]
             if len(sel_date) == 2:
                 mask = (filtered_df['Date'].dt.date >= sel_date[0]) & (filtered_df['Date'].dt.date <= sel_date[1])
                 filtered_df = filtered_df[mask]
                 
-            # --- CONSOLIDATION LOGIC ---
             if not filtered_df.empty:
                 filtered_df['DateStr'] = filtered_df['Date'].dt.strftime('%Y-%m-%d')
                 id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in filtered_df.columns else filtered_df.columns[2]
-                
-                # Create a concise material string
                 filtered_df['ItemDesc'] = filtered_df['Material'] + " (" + filtered_df['Qty'].astype(str) + ")"
                 
-                # Group items by ID to show as one entry
                 grouped = filtered_df.groupby([id_col, 'DateStr', 'Site', 'Worker']).agg({
-                    'ItemDesc': lambda x: ', '.join(x), # Merges "Box (1), Cable (10)"
+                    'ItemDesc': lambda x: ', '.join(x),
                     'ID': 'first' 
                 }).reset_index()
-                
                 grouped.columns = ['ID / Code', 'Date', 'Site', 'Worker', 'Materials Consumed', 'Ref_ID']
                 
-                st.dataframe(grouped.drop(columns=['Ref_ID']), use_container_width=True)
+                # Multi Delete (Uses grouped Dataframe visual but deletes by Ref_ID)
+                evt = st.dataframe(grouped.drop(columns=['Ref_ID']), use_container_width=True, on_select="rerun", selection_mode="multi-row")
+                
+                if evt.selection.rows:
+                    sel_group_ids = grouped.iloc[evt.selection.rows]['ID / Code'].tolist()
+                    # Find all original rows tied to this ID to delete all materials associated
+                    ids_to_delete = filtered_df[filtered_df[id_col].isin(sel_group_ids)]['ID'].tolist()
+                    if st.button(f"🗑️ Delete {len(ids_to_delete)} linked materials"):
+                        if bulk_delete_rows("WorkLogs", ids_to_delete): st.rerun()
             else:
                 st.info("No logs found matching filters.")
         else:
             st.info("No work logs available.")
 
-    # --- 2. GPS DATA LOG ---
+    # --- 3. GPS DATA LOG ---
     with t_gps:
         st.caption("View and export captured location data.")
         df_gps = get_data("WorkLogs")
         
         if not df_gps.empty and 'Latitude' in df_gps.columns:
-            # Filter rows with GPS data
             gps_valid = df_gps[df_gps['Latitude'].astype(str).str.strip() != ""].copy()
-            
             if not gps_valid.empty:
                 id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in gps_valid.columns else gps_valid.columns[2]
                 gps_unique = gps_valid.drop_duplicates(subset=[id_col])
@@ -336,18 +484,15 @@ with tabs[1]:
                     row = gps_unique[gps_unique['label'] == sel_loc].iloc[0]
                     lat = row['Latitude']
                     lon = row['Longitude']
-                    
-                    # WhatsApp Link
-                    maps_link = f"http://maps.google.com/?q={lat},{lon}"
-                    text = f"📍 Location for {row[id_col]}: {maps_link}"
-                    
+                    maps_link = f"https://maps.google.com/?q={lat},{lon}"
+                    text = f"📍 Installation Location for {row[id_col]}: {maps_link}"
                     st.link_button(f"📱 Share {row[id_col]} on WhatsApp", f"https://wa.me/?text={text}")
             else:
                 st.info("No GPS data recorded yet.")
         else:
             st.warning("GPS columns not found in Sheet. Please update header row.")
 
-    # --- 3. INVENTORY LOGS ---
+    # --- 4. INVENTORY LOGS ---
     with t_inv_view:
         df_inv = get_data("Inventory")
         if not df_inv.empty:
@@ -371,7 +516,7 @@ with tabs[1]:
                             st.success("Updated!"); time.sleep(1); st.rerun()
 
 # --- TAB 3: INVENTORY (Add Stock) ---
-with tabs[2]:
+with tabs[3]:
     st.subheader("📊 Stock Overview")
     if current_stock:
         sorted_stock = sorted(current_stock.items(), key=lambda x: x[1])
@@ -399,7 +544,7 @@ with tabs[2]:
             st.rerun()
 
 # --- TAB 4: WORKERS ---
-with tabs[3]:
+with tabs[4]:
     st.subheader("👥 Workers")
     with st.expander("➕ Add Worker"):
         with st.form("add_worker"):
