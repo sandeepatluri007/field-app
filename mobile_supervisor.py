@@ -6,6 +6,7 @@ from datetime import datetime
 import uuid
 import time
 import os
+import urllib.parse  # Added for safe WhatsApp link encoding
 
 # --- NEW IMPORTS ---
 try:
@@ -400,9 +401,12 @@ with tabs[2]:
                         lat = sel_row.get('Latitude', '')
                         lon = sel_row.get('Longitude', '')
                         loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No GPS recorded."
-                        msg = f"📍 *Survey Location*\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nLocation: {loc_link}"
                         
-                        st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={msg}")
+                        # UPDATED FORMAT & ENCODING
+                        msg = f"*Survey Details*\n\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nLocation: {loc_link}"
+                        encoded_msg = urllib.parse.quote(msg)
+                        
+                        st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={encoded_msg}")
                         
                     # PDF Export for all filtered rows
                     st.write("### 📄 Export Full List")
@@ -485,8 +489,10 @@ with tabs[2]:
                     lat = row['Latitude']
                     lon = row['Longitude']
                     maps_link = f"https://maps.google.com/?q={lat},{lon}"
+                    
                     text = f"📍 Installation Location for {row[id_col]}: {maps_link}"
-                    st.link_button(f"📱 Share {row[id_col]} on WhatsApp", f"https://wa.me/?text={text}")
+                    encoded_text = urllib.parse.quote(text)
+                    st.link_button(f"📱 Share {row[id_col]} on WhatsApp", f"https://wa.me/?text={encoded_text}")
             else:
                 st.info("No GPS data recorded yet.")
         else:
