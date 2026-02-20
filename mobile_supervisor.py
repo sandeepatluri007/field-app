@@ -380,85 +380,82 @@ with tabs[2]:
                 filtered_surv['Date'] = filtered_surv['Date'].dt.strftime('%Y-%m-%d')
                 display_cols = [c for c in filtered_surv.columns if c not in ["Synced"]]
                 
+                # SELECTION DATAFRAME
                 evt_surv = st.dataframe(filtered_surv[display_cols], on_select="rerun", selection_mode="multi-row", use_container_width=True)
                 
+                # MULTI-ROW ACTIONS
                 if evt_surv.selection.rows:
-                    sel_surv_ids = filtered_surv.iloc[evt_surv.selection.rows]['ID'].tolist()
-                    if st.button(f"🗑️ Delete {len(sel_surv_ids)} Survey Logs", key="del_surv"):
-                        if bulk_delete_rows("SurveyLogs", sel_surv_ids): st.rerun()
+                    selected_surv_df = filtered_surv.iloc[evt_surv.selection.rows]
+                    
+                    st.markdown("### ⚡ Actions for Selected Records")
+                    ca1, ca2, ca3 = st.columns(3)
+                    with ca1:
+                        if st.button(f"🗑️ Delete {len(selected_surv_df)} Logs", key="del_surv"):
+                            if bulk_delete_rows("SurveyLogs", selected_surv_df['ID'].tolist()): st.rerun()
+                    with ca2:
+                        msg = "*Survey Details*\n"
+                        for _, r in selected_surv_df.iterrows():
+                            lat = r.get('Latitude', '')
+                            lon = r.get('Longitude', '')
+                            loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No GPS recorded."
+                            msg += f"\n➖ DTR Name: {r['DTR Name']}\nDTR Code: {r['DTR Code']}\nSwitch Type: {r.get('LC/AB Switch', 'None')}\nLineman: {r.get('Lineman Name', 'N/A')}\nLocation: {loc_link}\n"
+                        encoded_msg = urllib.parse.quote(msg)
+                        st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={encoded_msg}")
+                    with ca3:
+                        if FPDF:
+                            pdf_data = generate_survey_pdf(selected_surv_df)
+                            st.download_button("⬇️ Download PDF", data=pdf_data, file_name="Selected_Survey_Logs.pdf", mime="application/pdf")
+                        else:
+                            st.warning("PDF generator not installed.")
                         
                 st.markdown("---")
                 
-                ce1, ce2 = st.columns(2)
-                with ce1:
-                    st.write("### ✏️ Edit / Export Record")
-                    filtered_surv['label'] = filtered_surv['Date'].astype(str) + " | " + filtered_surv['DTR Code'].astype(str) + " (" + filtered_surv['DTR Name'].astype(str) + ")"
-                    edit_sel_surv = st.selectbox("Select Record", [""] + filtered_surv['label'].tolist(), key="edit_sel_surv")
-                    
-                    if edit_sel_surv:
-                        sel_row = filtered_surv[filtered_surv['label'] == edit_sel_surv].iloc[0]
-                        with st.form("edit_surv_form"):
-                            st.caption(f"Editing ID: {sel_row['ID']}")
-                            n_date = st.text_input("Date", value=sel_row['Date'])
-                            n_name = st.text_input("DTR Name", value=sel_row['DTR Name'])
-                            n_code = st.text_input("DTR Code", value=sel_row['DTR Code'])
-                            
-                            curr_switch = str(sel_row.get('LC/AB Switch', 'None')).strip()
-                            st.markdown("###### Switch Present")
-                            c_edit_s1, c_edit_s2 = st.columns(2)
-                            n_lc = c_edit_s1.checkbox("LC", value=(curr_switch == 'LC'))
-                            n_ab = c_edit_s2.checkbox("AB Switch", value=(curr_switch == 'AB Switch'))
-                            
-                            n_lineman = st.text_input("Lineman Name", value=sel_row.get('Lineman Name', ''))
-                            n_lat = st.text_input("Latitude", value=sel_row.get('Latitude', ''))
-                            n_lon = st.text_input("Longitude", value=sel_row.get('Longitude', ''))
-                            
-                            if st.form_submit_button("💾 Save Changes"):
-                                if n_lc and n_ab:
-                                    st.error("⚠️ Please select either LC or AB Switch, not both.")
-                                else:
-                                    switch_val = "LC" if n_lc else "AB Switch" if n_ab else "None"
-                                    u_data = {
-                                        "Date": n_date, 
-                                        "DTR Name": n_name, 
-                                        "DTR Code": n_code, 
-                                        "Latitude": n_lat, 
-                                        "Longitude": n_lon,
-                                        "LC/AB Switch": switch_val,
-                                        "Lineman Name": n_lineman,
-                                        "Synced": "FALSE"
-                                    }
-                                    if update_row_data("SurveyLogs", sel_row['ID'], u_data):
-                                        st.success("Updated!"); time.sleep(1); st.rerun()
-                                    
-                with ce2:
-                    st.write("### 📤 Export Selected")
-                    if edit_sel_surv:
-                        lat = sel_row.get('Latitude', '')
-                        lon = sel_row.get('Longitude', '')
-                        loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No GPS recorded."
+                # SINGLE EDIT OPTION
+                st.write("### ✏️ Edit Single Record")
+                filtered_surv['label'] = filtered_surv['Date'].astype(str) + " | " + filtered_surv['DTR Code'].astype(str) + " (" + filtered_surv['DTR Name'].astype(str) + ")"
+                edit_sel_surv = st.selectbox("Select Record", [""] + filtered_surv['label'].tolist(), key="edit_sel_surv")
+                
+                if edit_sel_surv:
+                    sel_row = filtered_surv[filtered_surv['label'] == edit_sel_surv].iloc[0]
+                    with st.form("edit_surv_form"):
+                        st.caption(f"Editing ID: {sel_row['ID']}")
+                        n_date = st.text_input("Date", value=sel_row['Date'])
+                        n_name = st.text_input("DTR Name", value=sel_row['DTR Name'])
+                        n_code = st.text_input("DTR Code", value=sel_row['DTR Code'])
                         
-                        lc_ab_status = sel_row.get('LC/AB Switch', 'None')
-                        lineman_status = sel_row.get('Lineman Name', 'N/A')
+                        curr_switch = str(sel_row.get('LC/AB Switch', 'None')).strip()
+                        st.markdown("###### Switch Present")
+                        c_edit_s1, c_edit_s2 = st.columns(2)
+                        n_lc = c_edit_s1.checkbox("LC", value=(curr_switch == 'LC'))
+                        n_ab = c_edit_s2.checkbox("AB Switch", value=(curr_switch == 'AB Switch'))
                         
-                        # UPDATED FORMAT & ENCODING
-                        msg = f"*Survey Details*\n\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nSwitch Type: {lc_ab_status}\nLineman Name: {lineman_status}\nLocation: {loc_link}"
-                        encoded_msg = urllib.parse.quote(msg)
+                        n_lineman = st.text_input("Lineman Name", value=sel_row.get('Lineman Name', ''))
+                        n_lat = st.text_input("Latitude", value=sel_row.get('Latitude', ''))
+                        n_lon = st.text_input("Longitude", value=sel_row.get('Longitude', ''))
                         
-                        st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={encoded_msg}")
-                        
-                    st.write("### 📄 Export Full List")
-                    if FPDF:
-                        pdf_data = generate_survey_pdf(filtered_surv)
-                        st.download_button("⬇️ Download as PDF", data=pdf_data, file_name="Survey_Logs.pdf", mime="application/pdf")
-                    else:
-                        st.warning("PDF generator not installed.")
+                        if st.form_submit_button("💾 Save Changes"):
+                            if n_lc and n_ab:
+                                st.error("⚠️ Please select either LC or AB Switch, not both.")
+                            else:
+                                switch_val = "LC" if n_lc else "AB Switch" if n_ab else "None"
+                                u_data = {
+                                    "Date": n_date, 
+                                    "DTR Name": n_name, 
+                                    "DTR Code": n_code, 
+                                    "Latitude": n_lat, 
+                                    "Longitude": n_lon,
+                                    "LC/AB Switch": switch_val,
+                                    "Lineman Name": n_lineman,
+                                    "Synced": "FALSE"
+                                }
+                                if update_row_data("SurveyLogs", sel_row['ID'], u_data):
+                                    st.success("Updated!"); time.sleep(1); st.rerun()
             else:
                 st.info("No logs match filters.")
         else:
             st.info("No Survey Logs available.")
 
-    # --- 2. INSTALLATION LOGS VIEW ---
+    # --- 2. INSTALLATION LOGS VIEW (GROUPED & FILTERED) ---
     with t_view_logs:
         df = get_data("WorkLogs")
         if not df.empty:
@@ -466,38 +463,121 @@ with tabs[2]:
                 df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
             
             st.markdown("###### Filters")
-            c_f1, c_f2, c_f3 = st.columns(3)
+            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
             avail_sites = ["All"] + sorted(df['Site'].dropna().unique().tolist())
-            sel_site = c_f1.selectbox("Site", avail_sites, key="fil_site")
-            avail_workers = ["All"] + sorted(df['Worker'].dropna().unique().tolist())
-            sel_worker = c_f2.selectbox("Worker", avail_workers, key="fil_worker")
-            sel_date = c_f3.date_input("Date", [])
+            sel_loc = c_f1.selectbox("Location (Site)", avail_sites, key="wl_loc")
             
+            sel_mat = c_f2.text_input("Installation Type / Material", placeholder="e.g. Cable, Box")
+            
+            avail_workers = ["All"] + sorted(df['Worker'].dropna().unique().tolist())
+            sel_worker = c_f3.selectbox("Worker", avail_workers, key="wl_worker")
+            
+            sel_date = c_f4.date_input("Date Range", [], key="wl_date")
+            
+            c_f5, c_f6, c_f7 = st.columns(3)
+            sel_dtr = c_f5.text_input("DTR Code", key="wl_dtr")
+            sel_box = c_f6.text_input("DTR Box No", key="wl_box")
+            sel_ss = c_f7.text_input("Transformer SS No", key="wl_ss")
+            
+            # Apply Exhaustive Filters
             filtered_df = df.copy()
-            if sel_site != "All": filtered_df = filtered_df[filtered_df['Site'] == sel_site]
-            if sel_worker != "All": filtered_df = filtered_df[filtered_df['Worker'] == sel_worker]
+            if sel_loc != "All": 
+                filtered_df = filtered_df[filtered_df['Site'] == sel_loc]
+            if sel_worker != "All": 
+                filtered_df = filtered_df[filtered_df['Worker'] == sel_worker]
             if len(sel_date) == 2:
                 mask = (filtered_df['Date'].dt.date >= sel_date[0]) & (filtered_df['Date'].dt.date <= sel_date[1])
                 filtered_df = filtered_df[mask]
+            if sel_mat:
+                filtered_df = filtered_df[filtered_df['Material'].astype(str).str.contains(sel_mat, case=False, na=False)]
+                
+            id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in filtered_df.columns else filtered_df.columns[2]
+            if sel_dtr:
+                filtered_df = filtered_df[filtered_df[id_col].astype(str).str.contains(sel_dtr, case=False, na=False)]
+            if sel_box and 'DTR_Box_No' in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df['DTR_Box_No'].astype(str).str.contains(sel_box, case=False, na=False)]
+            if sel_ss and 'Transformer_SS_No' in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df['Transformer_SS_No'].astype(str).str.contains(sel_ss, case=False, na=False)]
                 
             if not filtered_df.empty:
                 filtered_df['DateStr'] = filtered_df['Date'].dt.strftime('%Y-%m-%d')
-                id_col = 'SC No/ DTR Code' if 'SC No/ DTR Code' in filtered_df.columns else filtered_df.columns[2]
-                filtered_df['ItemDesc'] = filtered_df['Material'] + " (" + filtered_df['Qty'].astype(str) + ")"
+                filtered_df['ItemDesc'] = filtered_df['Material'].astype(str) + " (" + filtered_df['Qty'].astype(str) + ")"
                 
-                grouped = filtered_df.groupby([id_col, 'DateStr', 'Site', 'Worker']).agg({
+                # Setup columns for grouping based on what is available in Google Sheets
+                ss_col = 'Transformer_SS_No' if 'Transformer_SS_No' in filtered_df.columns else None
+                box_col = 'DTR_Box_No' if 'DTR_Box_No' in filtered_df.columns else None
+                
+                group_cols = ['DateStr', id_col, 'Worker']
+                if ss_col: group_cols.append(ss_col)
+                if box_col: group_cols.append(box_col)
+                
+                # Fill NAs to ensure pandas groupby doesn't drop rows silently
+                filtered_df[group_cols] = filtered_df[group_cols].fillna("")
+                
+                # Group materials into a single row per work log
+                grouped = filtered_df.groupby(group_cols).agg({
                     'ItemDesc': lambda x: ', '.join(x),
-                    'ID': 'first' 
+                    'ID': lambda x: list(x)  # Store the list of all IDs for deletion purposes
                 }).reset_index()
-                grouped.columns = ['ID / Code', 'Date', 'Site', 'Worker', 'Materials Consumed', 'Ref_ID']
                 
-                evt = st.dataframe(grouped.drop(columns=['Ref_ID']), use_container_width=True, on_select="rerun", selection_mode="multi-row")
+                # Rename for cleaner display
+                grouped.rename(columns={'ItemDesc': 'Materials Consumed', 'DateStr': 'Date'}, inplace=True)
                 
-                if evt.selection.rows:
-                    sel_group_ids = grouped.iloc[evt.selection.rows]['ID / Code'].tolist()
-                    ids_to_delete = filtered_df[filtered_df[id_col].isin(sel_group_ids)]['ID'].tolist()
-                    if st.button(f"🗑️ Delete {len(ids_to_delete)} linked materials"):
-                        if bulk_delete_rows("WorkLogs", ids_to_delete): st.rerun()
+                # Define columns to show in dataframe (Hiding ID and Site, explicitly showing DTR, Box, SS)
+                display_cols = ['Date', id_col]
+                if ss_col: display_cols.append(ss_col)
+                if box_col: display_cols.append(box_col)
+                display_cols.extend(['Worker', 'Materials Consumed'])
+                
+                # Display Grouped DataFrame
+                evt_wl = st.dataframe(grouped[display_cols], on_select="rerun", selection_mode="multi-row", use_container_width=True)
+                
+                # Handle Deletion of Grouped Rows
+                if evt_wl.selection.rows:
+                    sel_wl_ids = []
+                    # Flatten the list of IDs from all selected rows
+                    for idx in evt_wl.selection.rows:
+                        sel_wl_ids.extend(grouped.iloc[idx]['ID'])
+                        
+                    if st.button(f"🗑️ Delete {len(evt_wl.selection.rows)} Work Log(s)"):
+                        if bulk_delete_rows("WorkLogs", sel_wl_ids): st.rerun()
+                
+                st.markdown("---")
+                
+                # Single Record Material Edit
+                st.write("### ✏️ Edit Individual Material")
+                st.caption("Select a specific material entry to edit its details.")
+                filtered_df['label'] = filtered_df['DateStr'].astype(str) + " | " + filtered_df[id_col].astype(str) + " (" + filtered_df['Material'].astype(str) + ")"
+                edit_sel_wl = st.selectbox("Select Record to Edit", [""] + filtered_df['label'].tolist(), key="edit_sel_wl")
+                
+                if edit_sel_wl:
+                    sel_row = filtered_df[filtered_df['label'] == edit_sel_wl].iloc[0]
+                    with st.form("edit_wl_form"):
+                        st.caption(f"Editing Component ID: {sel_row['ID']}")
+                        n_date = st.text_input("Date", value=sel_row['DateStr'])
+                        n_dtr = st.text_input("DTR Code", value=sel_row[id_col])
+                        n_ss = st.text_input("Transformer SS No", value=sel_row.get('Transformer_SS_No', ''))
+                        n_box = st.text_input("DTR Box No", value=sel_row.get('DTR_Box_No', ''))
+                        
+                        w_idx = workers.index(sel_row['Worker']) if sel_row['Worker'] in workers else 0
+                        n_worker = st.selectbox("Worker", workers, index=w_idx)
+                        
+                        n_mat = st.text_input("Material", value=sel_row['Material'])
+                        n_qty = st.number_input("Qty", value=float(sel_row['Qty']))
+                        
+                        if st.form_submit_button("💾 Save Material Changes"):
+                            u_data = {
+                                "Date": n_date, 
+                                id_col: n_dtr, 
+                                "Transformer_SS_No": n_ss,
+                                "DTR_Box_No": n_box,
+                                "Worker": n_worker,
+                                "Material": n_mat,
+                                "Qty": n_qty,
+                                "Synced": "FALSE"
+                            }
+                            if update_row_data("WorkLogs", sel_row['ID'], u_data):
+                                st.success("Updated!"); time.sleep(1); st.rerun()
             else:
                 st.info("No logs found matching filters.")
         else:
@@ -541,7 +621,7 @@ with tabs[2]:
             st.dataframe(df_inv, use_container_width=True)
             
             st.markdown("---")
-            st.write("### ✏️ Edit Inventory Record")
+            st.write("### ✏️ Edit or Delete Inventory Record")
             df_inv['label'] = df_inv['Date'].astype(str) + " | " + df_inv['Material'] + " (" + df_inv['Qty'].astype(str) + ")"
             edit_sel = st.selectbox("Select Record", [""] + df_inv['label'].tolist())
             
@@ -556,6 +636,10 @@ with tabs[2]:
                         u_data = {"Date": n_date, "Material": n_mat, "Qty": n_qty, "Synced": "FALSE"}
                         if update_row_data("Inventory", sel_row['ID'], u_data):
                             st.success("Updated!"); time.sleep(1); st.rerun()
+                            
+                if st.button("🗑️ Delete Record"):
+                    if bulk_delete_rows("Inventory", [sel_row['ID']]):
+                        st.success("Deleted!"); time.sleep(1); st.rerun()
 
 # --- TAB 3: INVENTORY (Add Stock) ---
 with tabs[3]:
