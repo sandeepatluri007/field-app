@@ -163,7 +163,7 @@ def generate_survey_pdf(df_export):
         lat = str(row.get('Latitude', ''))
         lon = str(row.get('Longitude', ''))
         date_val = str(row.get('Date', ''))
-        lc_val = str(row.get('LC/AB Switch', 'N/A'))
+        lc_val = str(row.get('LC/AB Switch', 'None'))
         lm_val = str(row.get('Lineman Name', 'N/A'))
         
         loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No Location Provided"
@@ -171,7 +171,7 @@ def generate_survey_pdf(df_export):
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(200, 8, txt=f"DTR: {dtr_name} (Code: {dtr_code}) | Date: {date_val}", ln=True)
         pdf.set_font("Arial", '', 10)
-        pdf.cell(200, 8, txt=f"LC/AB Switch: {lc_val} | Lineman: {lm_val}", ln=True)
+        pdf.cell(200, 8, txt=f"Switch: {lc_val} | Lineman: {lm_val}", ln=True)
         pdf.cell(200, 8, txt=f"Location: {loc_link}", ln=True)
         pdf.ln(5)
         
@@ -202,7 +202,6 @@ with tabs[0]:
     st.markdown("##### 📍 Site Survey Entry")
     auto_lat_surv, auto_long_surv = "", ""
     
-    # GPS Auto-capture (Outside form)
     if get_geolocation:
         if st.checkbox("📍 Capture GPS Automatically", key="gps_survey_check", help="Check this to fetch current location"):
             geo_data = get_geolocation(component_key='gps_capture_survey')
@@ -218,9 +217,12 @@ with tabs[0]:
         s_name = c1.text_input("DTR Name", placeholder="e.g. Main Street Transformer")
         s_code = c2.text_input("DTR Code", placeholder="e.g. DTR-101")
         
+        s_lineman = st.text_input("Lineman Name", placeholder="e.g. Ramesh")
+        
+        st.markdown("###### Switch Present")
         c3, c4 = st.columns(2)
-        s_lc_ab = c3.checkbox("LC or AB Switch Present?")
-        s_lineman = c4.text_input("Lineman Name", placeholder="e.g. Ramesh")
+        s_lc = c3.checkbox("LC")
+        s_ab = c4.checkbox("AB Switch")
         
         st.caption("Location Coordinates (Auto-filled if 'Capture GPS' is checked)")
         c_lat, c_long = st.columns(2)
@@ -228,9 +230,12 @@ with tabs[0]:
         s_long = c_long.text_input("Longitude", value=auto_long_surv)
         
         if st.form_submit_button("🚀 Submit Survey", type="primary", use_container_width=True):
-            if not s_name or not s_code:
+            if s_lc and s_ab:
+                st.error("⚠️ Please select either LC or AB Switch, not both.")
+            elif not s_name or not s_code:
                 st.error("⚠️ DTR Name and DTR Code are required.")
             else:
+                switch_val = "LC" if s_lc else "AB Switch" if s_ab else "None"
                 payload = {
                     "ID": str(uuid.uuid4()),
                     "Date": str(s_date),
@@ -238,7 +243,7 @@ with tabs[0]:
                     "DTR Code": s_code,
                     "Latitude": s_lat,
                     "Longitude": s_long,
-                    "LC/AB Switch": "Yes" if s_lc_ab else "No",
+                    "LC/AB Switch": switch_val,
                     "Lineman Name": s_lineman,
                     "Synced": "FALSE"
                 }
@@ -258,7 +263,6 @@ with tabs[1]:
     is_dtr = "DTR" in w_meter_type.upper()
     id_label = "DTR Code" if is_dtr else "Service Number"
     
-    # --- GPS AUTO-CAPTURE (OUTSIDE FORM) ---
     st.markdown("##### 📍 Location")
     auto_lat, auto_long = "", ""
     
@@ -296,7 +300,6 @@ with tabs[1]:
         # --- LOGIC: FETCH FROM SURVEY ---
         surv_lat, surv_lon = "", ""
         if w_main_id and not survey_data.empty and 'DTR Code' in survey_data.columns:
-            # Case-insensitive match
             match = survey_data[survey_data['DTR Code'].astype(str).str.lower() == w_main_id.lower()]
             if not match.empty:
                 surv_lat = str(match.iloc[0].get('Latitude', ''))
@@ -312,7 +315,6 @@ with tabs[1]:
         st.caption("Coordinates (Auto-filled by Checkbox or Survey Database)")
         c_lat, c_long = st.columns(2)
         
-        # Priority: 1. Auto GPS 2. Survey DB 3. Empty
         final_lat_val = auto_lat if auto_lat else surv_lat
         final_lon_val = auto_long if auto_long else surv_lon
         
@@ -345,7 +347,6 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("🗂️ Data Management")
     
-    # Sub-tabs for Data Views
     t_survey_view, t_view_logs, t_gps, t_inv_view = st.tabs(["📋 Survey Logs", "📋 Installation Logs", "📍 GPS Data", "📦 Inventory Logs"])
     
     # --- 1. SURVEY LOGS VIEW ---
@@ -357,17 +358,20 @@ with tabs[2]:
                 survey_data['Date'] = pd.to_datetime(survey_data['Date'], errors='coerce')
             
             st.markdown("###### Filters")
-            cf1, cf2 = st.columns(2)
+            cf1, cf2, cf3 = st.columns(3)
             surv_search = cf1.text_input("Search DTR Code / Name")
-            surv_date = cf2.date_input("Date Range", [])
+            surv_switch = cf2.selectbox("Switch Type", ["All", "LC", "AB Switch", "None"])
+            surv_date = cf3.date_input("Date Range", [])
             
-            # Apply Filters
             filtered_surv = survey_data.copy()
+            
             if surv_search:
                 filtered_surv = filtered_surv[
                     filtered_surv['DTR Code'].astype(str).str.contains(surv_search, case=False, na=False) |
                     filtered_surv['DTR Name'].astype(str).str.contains(surv_search, case=False, na=False)
                 ]
+            if surv_switch != "All" and 'LC/AB Switch' in filtered_surv.columns:
+                filtered_surv = filtered_surv[filtered_surv['LC/AB Switch'].astype(str).str.strip() == surv_switch]
             if len(surv_date) == 2:
                 mask = (filtered_surv['Date'].dt.date >= surv_date[0]) & (filtered_surv['Date'].dt.date <= surv_date[1])
                 filtered_surv = filtered_surv[mask]
@@ -376,7 +380,6 @@ with tabs[2]:
                 filtered_surv['Date'] = filtered_surv['Date'].dt.strftime('%Y-%m-%d')
                 display_cols = [c for c in filtered_surv.columns if c not in ["Synced"]]
                 
-                # Multi-Delete Selection
                 evt_surv = st.dataframe(filtered_surv[display_cols], on_select="rerun", selection_mode="multi-row", use_container_width=True)
                 
                 if evt_surv.selection.rows:
@@ -386,7 +389,6 @@ with tabs[2]:
                         
                 st.markdown("---")
                 
-                # Export & Edit Options
                 ce1, ce2 = st.columns(2)
                 with ce1:
                     st.write("### ✏️ Edit / Export Record")
@@ -400,24 +402,34 @@ with tabs[2]:
                             n_date = st.text_input("Date", value=sel_row['Date'])
                             n_name = st.text_input("DTR Name", value=sel_row['DTR Name'])
                             n_code = st.text_input("DTR Code", value=sel_row['DTR Code'])
-                            n_lc_ab = st.checkbox("LC or AB Switch Present?", value=str(sel_row.get('LC/AB Switch', 'No')).strip().lower() == 'yes')
+                            
+                            curr_switch = str(sel_row.get('LC/AB Switch', 'None')).strip()
+                            st.markdown("###### Switch Present")
+                            c_edit_s1, c_edit_s2 = st.columns(2)
+                            n_lc = c_edit_s1.checkbox("LC", value=(curr_switch == 'LC'))
+                            n_ab = c_edit_s2.checkbox("AB Switch", value=(curr_switch == 'AB Switch'))
+                            
                             n_lineman = st.text_input("Lineman Name", value=sel_row.get('Lineman Name', ''))
                             n_lat = st.text_input("Latitude", value=sel_row.get('Latitude', ''))
                             n_lon = st.text_input("Longitude", value=sel_row.get('Longitude', ''))
                             
                             if st.form_submit_button("💾 Save Changes"):
-                                u_data = {
-                                    "Date": n_date, 
-                                    "DTR Name": n_name, 
-                                    "DTR Code": n_code, 
-                                    "Latitude": n_lat, 
-                                    "Longitude": n_lon,
-                                    "LC/AB Switch": "Yes" if n_lc_ab else "No",
-                                    "Lineman Name": n_lineman,
-                                    "Synced": "FALSE"
-                                }
-                                if update_row_data("SurveyLogs", sel_row['ID'], u_data):
-                                    st.success("Updated!"); time.sleep(1); st.rerun()
+                                if n_lc and n_ab:
+                                    st.error("⚠️ Please select either LC or AB Switch, not both.")
+                                else:
+                                    switch_val = "LC" if n_lc else "AB Switch" if n_ab else "None"
+                                    u_data = {
+                                        "Date": n_date, 
+                                        "DTR Name": n_name, 
+                                        "DTR Code": n_code, 
+                                        "Latitude": n_lat, 
+                                        "Longitude": n_lon,
+                                        "LC/AB Switch": switch_val,
+                                        "Lineman Name": n_lineman,
+                                        "Synced": "FALSE"
+                                    }
+                                    if update_row_data("SurveyLogs", sel_row['ID'], u_data):
+                                        st.success("Updated!"); time.sleep(1); st.rerun()
                                     
                 with ce2:
                     st.write("### 📤 Export Selected")
@@ -426,16 +438,15 @@ with tabs[2]:
                         lon = sel_row.get('Longitude', '')
                         loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No GPS recorded."
                         
-                        lc_ab_status = sel_row.get('LC/AB Switch', 'N/A')
+                        lc_ab_status = sel_row.get('LC/AB Switch', 'None')
                         lineman_status = sel_row.get('Lineman Name', 'N/A')
                         
-                        # Format customized accurately to your request
-                        msg = f"*Survey Details*\n\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nLC/AB Switch: {lc_ab_status}\nLineman: {lineman_status}\nLocation: {loc_link}"
+                        # UPDATED FORMAT & ENCODING
+                        msg = f"*Survey Details*\n\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nSwitch Type: {lc_ab_status}\nLineman Name: {lineman_status}\nLocation: {loc_link}"
                         encoded_msg = urllib.parse.quote(msg)
                         
                         st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={encoded_msg}")
                         
-                    # PDF Export for all filtered rows
                     st.write("### 📄 Export Full List")
                     if FPDF:
                         pdf_data = generate_survey_pdf(filtered_surv)
