@@ -6,7 +6,7 @@ from datetime import datetime
 import uuid
 import time
 import os
-import urllib.parse  # Added for safe WhatsApp link encoding
+import urllib.parse 
 
 # --- NEW IMPORTS ---
 try:
@@ -25,8 +25,8 @@ except ImportError:
 SHEET_NAME = "Smart_Infra_DB"
 LOGO_FILE = "logodesign4.jpg"
 
-# --- CACHED CONNECTION ---
-@st.cache_resource
+# --- CACHED CONNECTION (Optimized for Mobile) ---
+@st.cache_resource(show_spinner=False)
 def get_connection():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     try:
@@ -45,7 +45,7 @@ def get_connection():
 def clear_cache():
     st.cache_data.clear()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_data(worksheet):
     client = get_connection()
     try:
@@ -119,6 +119,7 @@ def update_worker_registry(edited_df):
     ws.update([headers] + edited_df.values.tolist())
     clear_cache()
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_settings_lists():
     df = get_data("Settings")
     if not df.empty:
@@ -128,6 +129,7 @@ def get_settings_lists():
         return [x for x in sites if x], [x for x in m_types if x], [x for x in materials if x]
     return ["Default Site"], ["1 Phase", "3 Phase", "DTR"], ["Cable", "Lugs"]
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_worker_list():
     df = get_data("Workers")
     return df['Name'].tolist() if not df.empty else ["General"]
@@ -161,11 +163,15 @@ def generate_survey_pdf(df_export):
         lat = str(row.get('Latitude', ''))
         lon = str(row.get('Longitude', ''))
         date_val = str(row.get('Date', ''))
+        lc_val = str(row.get('LC/AB Switch', 'N/A'))
+        lm_val = str(row.get('Lineman Name', 'N/A'))
+        
         loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No Location Provided"
         
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(200, 8, txt=f"DTR: {dtr_name} (Code: {dtr_code}) | Date: {date_val}", ln=True)
         pdf.set_font("Arial", '', 10)
+        pdf.cell(200, 8, txt=f"LC/AB Switch: {lc_val} | Lineman: {lm_val}", ln=True)
         pdf.cell(200, 8, txt=f"Location: {loc_link}", ln=True)
         pdf.ln(5)
         
@@ -181,7 +187,7 @@ with c_head1:
 with c_head2:
     st.title("Site Supervisor")
 
-# --- TAB NAVIGATION (Survey Tab Added) ---
+# --- TAB NAVIGATION ---
 tabs = st.tabs(["📋 Survey", "📝 Work Logs", "📊 View & Manage", "📦 Inventory", "👥 Workers"])
 
 sites_list, meter_types_list, materials_list = get_settings_lists()
@@ -207,9 +213,14 @@ with tabs[0]:
                 
     with st.form("survey_log", clear_on_submit=True):
         s_date = st.date_input("Date", datetime.today())
+        
         c1, c2 = st.columns(2)
         s_name = c1.text_input("DTR Name", placeholder="e.g. Main Street Transformer")
         s_code = c2.text_input("DTR Code", placeholder="e.g. DTR-101")
+        
+        c3, c4 = st.columns(2)
+        s_lc_ab = c3.checkbox("LC or AB Switch Present?")
+        s_lineman = c4.text_input("Lineman Name", placeholder="e.g. Ramesh")
         
         st.caption("Location Coordinates (Auto-filled if 'Capture GPS' is checked)")
         c_lat, c_long = st.columns(2)
@@ -227,6 +238,8 @@ with tabs[0]:
                     "DTR Code": s_code,
                     "Latitude": s_lat,
                     "Longitude": s_long,
+                    "LC/AB Switch": "Yes" if s_lc_ab else "No",
+                    "Lineman Name": s_lineman,
                     "Synced": "FALSE"
                 }
                 try:
@@ -332,7 +345,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("🗂️ Data Management")
     
-    # Sub-tabs for Data Views (Added Survey Logs)
+    # Sub-tabs for Data Views
     t_survey_view, t_view_logs, t_gps, t_inv_view = st.tabs(["📋 Survey Logs", "📋 Installation Logs", "📍 GPS Data", "📦 Inventory Logs"])
     
     # --- 1. SURVEY LOGS VIEW ---
@@ -387,11 +400,22 @@ with tabs[2]:
                             n_date = st.text_input("Date", value=sel_row['Date'])
                             n_name = st.text_input("DTR Name", value=sel_row['DTR Name'])
                             n_code = st.text_input("DTR Code", value=sel_row['DTR Code'])
+                            n_lc_ab = st.checkbox("LC or AB Switch Present?", value=str(sel_row.get('LC/AB Switch', 'No')).strip().lower() == 'yes')
+                            n_lineman = st.text_input("Lineman Name", value=sel_row.get('Lineman Name', ''))
                             n_lat = st.text_input("Latitude", value=sel_row.get('Latitude', ''))
                             n_lon = st.text_input("Longitude", value=sel_row.get('Longitude', ''))
                             
                             if st.form_submit_button("💾 Save Changes"):
-                                u_data = {"Date": n_date, "DTR Name": n_name, "DTR Code": n_code, "Latitude": n_lat, "Longitude": n_lon, "Synced": "FALSE"}
+                                u_data = {
+                                    "Date": n_date, 
+                                    "DTR Name": n_name, 
+                                    "DTR Code": n_code, 
+                                    "Latitude": n_lat, 
+                                    "Longitude": n_lon,
+                                    "LC/AB Switch": "Yes" if n_lc_ab else "No",
+                                    "Lineman Name": n_lineman,
+                                    "Synced": "FALSE"
+                                }
                                 if update_row_data("SurveyLogs", sel_row['ID'], u_data):
                                     st.success("Updated!"); time.sleep(1); st.rerun()
                                     
@@ -402,8 +426,11 @@ with tabs[2]:
                         lon = sel_row.get('Longitude', '')
                         loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No GPS recorded."
                         
-                        # UPDATED FORMAT & ENCODING
-                        msg = f"*Survey Details*\n\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nLocation: {loc_link}"
+                        lc_ab_status = sel_row.get('LC/AB Switch', 'N/A')
+                        lineman_status = sel_row.get('Lineman Name', 'N/A')
+                        
+                        # Format customized accurately to your request
+                        msg = f"*Survey Details*\n\nDTR Name: {sel_row['DTR Name']}\nDTR Code: {sel_row['DTR Code']}\nLC/AB Switch: {lc_ab_status}\nLineman: {lineman_status}\nLocation: {loc_link}"
                         encoded_msg = urllib.parse.quote(msg)
                         
                         st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={encoded_msg}")
@@ -453,12 +480,10 @@ with tabs[2]:
                 }).reset_index()
                 grouped.columns = ['ID / Code', 'Date', 'Site', 'Worker', 'Materials Consumed', 'Ref_ID']
                 
-                # Multi Delete (Uses grouped Dataframe visual but deletes by Ref_ID)
                 evt = st.dataframe(grouped.drop(columns=['Ref_ID']), use_container_width=True, on_select="rerun", selection_mode="multi-row")
                 
                 if evt.selection.rows:
                     sel_group_ids = grouped.iloc[evt.selection.rows]['ID / Code'].tolist()
-                    # Find all original rows tied to this ID to delete all materials associated
                     ids_to_delete = filtered_df[filtered_df[id_col].isin(sel_group_ids)]['ID'].tolist()
                     if st.button(f"🗑️ Delete {len(ids_to_delete)} linked materials"):
                         if bulk_delete_rows("WorkLogs", ids_to_delete): st.rerun()
