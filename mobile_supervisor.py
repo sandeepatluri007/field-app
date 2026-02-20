@@ -169,7 +169,7 @@ def generate_survey_pdf(df_export):
         loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No Location Provided"
         
         pdf.set_font("Arial", 'B', 10)
-        pdf.cell(200, 8, txt=f"DTR: {dtr_name} (Code: {dtr_code}) | Date: {date_val}", ln=True)
+        pdf.cell(200, 8, txt=f"DTR SS No: {dtr_name} (Code: {dtr_code}) | Date: {date_val}", ln=True)
         pdf.set_font("Arial", '', 10)
         pdf.cell(200, 8, txt=f"Switch: {lc_val} | Lineman: {lm_val}", ln=True)
         pdf.cell(200, 8, txt=f"Location: {loc_link}", ln=True)
@@ -214,7 +214,7 @@ with tabs[0]:
         s_date = st.date_input("Date", datetime.today())
         
         c1, c2 = st.columns(2)
-        s_name = c1.text_input("DTR Name", placeholder="e.g. Main Street Transformer")
+        s_name = c1.text_input("DTR SS No", placeholder="e.g. SS-101")
         s_code = c2.text_input("DTR Code", placeholder="e.g. DTR-101")
         
         s_lineman = st.text_input("Lineman Name", placeholder="e.g. Ramesh")
@@ -233,9 +233,10 @@ with tabs[0]:
             if s_lc and s_ab:
                 st.error("⚠️ Please select either LC or AB Switch, not both.")
             elif not s_name or not s_code:
-                st.error("⚠️ DTR Name and DTR Code are required.")
+                st.error("⚠️ DTR SS No and DTR Code are required.")
             else:
                 switch_val = "LC" if s_lc else "AB Switch" if s_ab else "None"
+                # Backend sheet still uses 'DTR Name' as column header
                 payload = {
                     "ID": str(uuid.uuid4()),
                     "Date": str(s_date),
@@ -292,7 +293,7 @@ with tabs[1]:
         if is_dtr:
             w_dtr_box = c5.text_input("DTR Box No")
             c6, c7 = st.columns(2)
-            w_ss_no = c6.text_input("Transformer SS No")
+            w_ss_no = c6.text_input("DTR SS No")
             w_capacity = c7.text_input("Transformer Capacity (KVA)")
         else:
             c5.write("")
@@ -323,6 +324,7 @@ with tabs[1]:
 
         if st.form_submit_button("🚀 Submit Log", type="primary", use_container_width=True):
             batch_rows = []
+            # Meta data layout maintains standard mapping for Google Sheets
             meta_data = [
                 str(w_date), w_main_id, w_dtr_box, w_ss_no, w_capacity, w_site, w_worker
             ]
@@ -359,7 +361,7 @@ with tabs[2]:
             
             st.markdown("###### Filters")
             cf1, cf2, cf3 = st.columns(3)
-            surv_search = cf1.text_input("Search DTR Code / Name")
+            surv_search = cf1.text_input("Search DTR Code / DTR SS No")
             surv_switch = cf2.selectbox("Switch Type", ["All", "LC", "AB Switch", "None"])
             surv_date = cf3.date_input("Date Range", [])
             
@@ -380,8 +382,9 @@ with tabs[2]:
                 filtered_surv['Date'] = filtered_surv['Date'].dt.strftime('%Y-%m-%d')
                 display_cols = [c for c in filtered_surv.columns if c not in ["Synced"]]
                 
-                # SELECTION DATAFRAME
-                evt_surv = st.dataframe(filtered_surv[display_cols], on_select="rerun", selection_mode="multi-row", use_container_width=True)
+                # SELECTION DATAFRAME (Rename 'DTR Name' to 'DTR SS No' purely for UI Display)
+                display_df = filtered_surv[display_cols].rename(columns={'DTR Name': 'DTR SS No'})
+                evt_surv = st.dataframe(display_df, on_select="rerun", selection_mode="multi-row", use_container_width=True)
                 
                 # MULTI-ROW ACTIONS
                 if evt_surv.selection.rows:
@@ -398,7 +401,7 @@ with tabs[2]:
                             lat = r.get('Latitude', '')
                             lon = r.get('Longitude', '')
                             loc_link = f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "No GPS recorded."
-                            msg += f"\n➖ DTR Name: {r['DTR Name']}\nDTR Code: {r['DTR Code']}\nSwitch Type: {r.get('LC/AB Switch', 'None')}\nLineman: {r.get('Lineman Name', 'N/A')}\nLocation: {loc_link}\n"
+                            msg += f"\n➖ DTR SS No: {r['DTR Name']}\nDTR Code: {r['DTR Code']}\nSwitch Type: {r.get('LC/AB Switch', 'None')}\nLineman: {r.get('Lineman Name', 'N/A')}\nLocation: {loc_link}\n"
                         encoded_msg = urllib.parse.quote(msg)
                         st.link_button("📱 Share via WhatsApp", f"https://wa.me/?text={encoded_msg}")
                     with ca3:
@@ -420,7 +423,7 @@ with tabs[2]:
                     with st.form("edit_surv_form"):
                         st.caption(f"Editing ID: {sel_row['ID']}")
                         n_date = st.text_input("Date", value=sel_row['Date'])
-                        n_name = st.text_input("DTR Name", value=sel_row['DTR Name'])
+                        n_name = st.text_input("DTR SS No", value=sel_row['DTR Name'])
                         n_code = st.text_input("DTR Code", value=sel_row['DTR Code'])
                         
                         curr_switch = str(sel_row.get('LC/AB Switch', 'None')).strip()
@@ -440,7 +443,7 @@ with tabs[2]:
                                 switch_val = "LC" if n_lc else "AB Switch" if n_ab else "None"
                                 u_data = {
                                     "Date": n_date, 
-                                    "DTR Name": n_name, 
+                                    "DTR Name": n_name,  # Saves to Sheet as 'DTR Name'
                                     "DTR Code": n_code, 
                                     "Latitude": n_lat, 
                                     "Longitude": n_lon,
@@ -477,7 +480,7 @@ with tabs[2]:
             c_f5, c_f6, c_f7 = st.columns(3)
             sel_dtr = c_f5.text_input("DTR Code", key="wl_dtr")
             sel_box = c_f6.text_input("DTR Box No", key="wl_box")
-            sel_ss = c_f7.text_input("Transformer SS No", key="wl_ss")
+            sel_ss = c_f7.text_input("DTR SS No", key="wl_ss")
             
             # Apply Exhaustive Filters
             filtered_df = df.copy()
@@ -520,12 +523,14 @@ with tabs[2]:
                     'ID': lambda x: list(x)  # Store the list of all IDs for deletion purposes
                 }).reset_index()
                 
-                # Rename for cleaner display
-                grouped.rename(columns={'ItemDesc': 'Materials Consumed', 'DateStr': 'Date'}, inplace=True)
+                # Rename for cleaner display ("Transformer_SS_No" mapped to "DTR SS No")
+                rename_dict = {'ItemDesc': 'Materials Consumed', 'DateStr': 'Date'}
+                if ss_col: rename_dict[ss_col] = 'DTR SS No'
+                grouped.rename(columns=rename_dict, inplace=True)
                 
                 # Define columns to show in dataframe (Hiding ID and Site, explicitly showing DTR, Box, SS)
                 display_cols = ['Date', id_col]
-                if ss_col: display_cols.append(ss_col)
+                if ss_col: display_cols.append('DTR SS No')
                 if box_col: display_cols.append(box_col)
                 display_cols.extend(['Worker', 'Materials Consumed'])
                 
@@ -556,7 +561,7 @@ with tabs[2]:
                         st.caption(f"Editing Component ID: {sel_row['ID']}")
                         n_date = st.text_input("Date", value=sel_row['DateStr'])
                         n_dtr = st.text_input("DTR Code", value=sel_row[id_col])
-                        n_ss = st.text_input("Transformer SS No", value=sel_row.get('Transformer_SS_No', ''))
+                        n_ss = st.text_input("DTR SS No", value=sel_row.get('Transformer_SS_No', ''))
                         n_box = st.text_input("DTR Box No", value=sel_row.get('DTR_Box_No', ''))
                         
                         w_idx = workers.index(sel_row['Worker']) if sel_row['Worker'] in workers else 0
@@ -569,7 +574,7 @@ with tabs[2]:
                             u_data = {
                                 "Date": n_date, 
                                 id_col: n_dtr, 
-                                "Transformer_SS_No": n_ss,
+                                "Transformer_SS_No": n_ss, # Saves to Sheet as 'Transformer_SS_No'
                                 "DTR_Box_No": n_box,
                                 "Worker": n_worker,
                                 "Material": n_mat,
