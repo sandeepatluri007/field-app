@@ -8,7 +8,7 @@ import time
 import os
 import urllib.parse
 
-# --- NEW IMPORTS ---
+# --- IMPORTS ---
 try:
     from streamlit_js_eval import get_geolocation
 except ImportError:
@@ -22,8 +22,9 @@ except ImportError:
     FPDF = None
 
 # --- CONFIGURATION ---
-SHEET_NAME = "Smart_Infra_DB"
-LOGO_FILE  = "logodesign4.jpg"
+SHEET_NAME       = "Smart_Infra_DB"
+LOGO_FILE        = "logodesign4.jpg"
+DEFAULT_LUGS_QTY = 8   # auto-filled whenever cable is entered without lugs
 
 # =============================================================================
 # CONNECTION & DATA HELPERS
@@ -187,6 +188,61 @@ def generate_survey_pdf(df_export):
     return pdf.output(dest='S').encode('latin-1')
 
 # =============================================================================
+# MATERIAL DISPLAY HELPERS  (used in Installation Logs tiles)
+# =============================================================================
+def _qty_str(qty, unit=""):
+    """Return a clean qty string: int if whole number, float otherwise."""
+    try:
+        q = float(qty)
+        s = str(int(q)) if q == int(q) else str(round(q, 2))
+    except:
+        s = str(qty)
+    return f"{s}{unit}"
+
+def format_mat_line(mat_dict):
+    """
+    Build the structured material display line for a tile.
+    Order: Box types first → Cable → Lugs → everything else.
+    Example: 📦 DTR Box: 1  ·  🔌 Cable: 20m  ·  🔧 Lugs: 8
+    """
+    parts   = []
+    handled = set()
+
+    # 1. Box-type materials (anything containing "box" case-insensitively)
+    for mat, qty in mat_dict.items():
+        if 'box' in mat.lower():
+            parts.append(f"📦 {mat}: {_qty_str(qty)}")
+            handled.add(mat)
+
+    # 2. Cable
+    for mat, qty in mat_dict.items():
+        if mat.lower() == 'cable' and mat not in handled:
+            parts.append(f"🔌 Cable: {_qty_str(qty, 'm')}")
+            handled.add(mat)
+
+    # 3. Lugs
+    for mat, qty in mat_dict.items():
+        if mat.lower() == 'lugs' and mat not in handled:
+            parts.append(f"🔧 Lugs: {_qty_str(qty)}")
+            handled.add(mat)
+
+    # 4. Anything else
+    for mat, qty in mat_dict.items():
+        if mat not in handled:
+            parts.append(f"• {mat}: {_qty_str(qty)}")
+
+    return "  ·  ".join(parts) if parts else "—"
+
+def tile_needs_lugs_fix(mat_dict):
+    """
+    Return True if this installation has cable but is missing lugs entirely
+    (or has lugs qty == 0).  These tiles get the auto-fix button.
+    """
+    cable_qty = sum(v for k, v in mat_dict.items() if k.lower() == 'cable')
+    lugs_qty  = sum(v for k, v in mat_dict.items() if k.lower() == 'lugs')
+    return cable_qty > 0 and lugs_qty == 0
+
+# =============================================================================
 # UI SETUP
 # =============================================================================
 st.set_page_config(page_title="Site Supervisor", page_icon="👷", layout="centered")
@@ -211,7 +267,7 @@ current_stock = calculate_stock()
 survey_data   = get_data("SurveyLogs")
 
 # =============================================================================
-# TAB 0 — SURVEY ENTRY
+# TAB 0 — SURVEY ENTRY  (unchanged)
 # =============================================================================
 with tabs[0]:
     st.markdown("##### 📍 Site Survey Entry")
@@ -266,6 +322,11 @@ with tabs[0]:
 
 # =============================================================================
 # TAB 1 — LOG WORK
+#
+# CHANGES vs previous version:
+#   • DTR type: DTR Code OR SS No is now MANDATORY (block submit if both blank)
+#   • Non-DTR: Service Number stays required
+#   • Auto-lugs: if cable > 0 and lugs = 0 → auto-set lugs = DEFAULT_LUGS_QTY
 # =============================================================================
 with tabs[1]:
     st.markdown("##### 1. Asset Type")
@@ -290,17 +351,35 @@ with tabs[1]:
         w_date   = c1.date_input("Date",   datetime.today())
         w_site   = c2.selectbox("Site",    sites_list)
         w_worker = c3.selectbox("Worker",  workers)
-        c4, c5       = st.columns(2)
-        w_main_id    = c4.text_input(id_label)
+
+        c4, c5    = st.columns(2)
+        w_main_id = c4.text_input(
+            id_label,
+            help=("DTR Code for this installation. "
+                  "Required unless DTR SS No is entered below.")
+            if is_dtr else "Service Number is required."
+        )
         w_dtr_box = w_ss_no = w_capacity = ""
         if is_dtr:
-            w_dtr_box  = c5.text_input("DTR Box No")
+            w_dtr_box  = c5.text_input("DTR Box No",
+                                        help="Box serial / reference number (optional)")
             c6, c7     = st.columns(2)
-            w_ss_no    = c6.text_input("DTR SS No")
+            w_ss_no    = c6.text_input(
+                "DTR SS No",
+                help="Sub-station number. Required if DTR Code is left blank."
+            )
             w_capacity = c7.text_input("Transformer Capacity (KVA)")
+
+            # Helpful inline reminder when both ID fields are empty
+            if not w_main_id.strip() and not w_ss_no.strip():
+                st.caption(
+                    "⚠️ Enter at least **DTR Code** or **DTR SS No** "
+                    "to submit this log."
+                )
         else:
             c5.write("")
 
+        # Auto-fill GPS from survey database
         surv_lat = surv_lon = ""
         if w_main_id and not survey_data.empty and 'DTR Code' in survey_data.columns:
             match = survey_data[
@@ -315,30 +394,84 @@ with tabs[1]:
         st.markdown("##### 3. Materials")
         c_m1, c_m2 = st.columns(2)
         qty_cable = c_m1.number_input("Cable (Mtrs)", min_value=0.0, step=1.0)
-        qty_lugs  = c_m2.number_input("Lugs (Qty)",   min_value=0.0, step=1.0)
-        st.caption("Coordinates (Auto-filled by Checkbox or Survey Database)")
+        qty_lugs  = c_m2.number_input(
+            f"Lugs (Qty)  —  leave 0 to auto-fill {DEFAULT_LUGS_QTY} when cable > 0",
+            min_value=0.0, step=1.0,
+            help=f"Default {DEFAULT_LUGS_QTY} Lugs are added automatically "
+                 f"whenever cable is entered and this field is left at 0."
+        )
+        st.caption("Coordinates (Auto-filled by GPS checkbox or Survey Database)")
         c_lt, c_lg = st.columns(2)
         w_lat  = c_lt.text_input("Latitude",  value=(auto_lat  or surv_lat))
         w_long = c_lg.text_input("Longitude", value=(auto_long or surv_lon))
 
-        if st.form_submit_button("🚀 Submit Log", type="primary",
-                                 use_container_width=True):
-            batch_rows    = []
-            meta_data     = [str(w_date), w_main_id, w_dtr_box, w_ss_no,
-                             w_capacity, w_site, w_worker]
-            gps_data      = [w_lat, w_long]
-            box_item      = f"{w_meter_type} Box"
-            batch_rows.append([str(uuid.uuid4())] + meta_data +
-                              [box_item, 1] + gps_data + ["FALSE"])
+        submitted = st.form_submit_button(
+            "🚀 Submit Log", type="primary", use_container_width=True
+        )
+
+    # ── Validation & save (outside the form so we can show errors cleanly) ──
+    if submitted:
+        # ── VALIDATION ────────────────────────────────────────────────────────
+        validation_ok = True
+
+        if is_dtr:
+            if not w_main_id.strip() and not w_ss_no.strip():
+                st.error(
+                    "⚠️ **DTR installation requires at least one identifier.**  \n"
+                    "Please enter either **DTR Code** or **DTR SS No** (or both) "
+                    "before submitting."
+                )
+                validation_ok = False
+        else:
+            if not w_main_id.strip():
+                st.error("⚠️ **Service Number is required.**")
+                validation_ok = False
+
+        if validation_ok:
+            # ── AUTO-LUGS ─────────────────────────────────────────────────────
+            effective_lugs = qty_lugs
+            lugs_auto_added = False
+            if qty_cable > 0 and qty_lugs == 0:
+                effective_lugs  = float(DEFAULT_LUGS_QTY)
+                lugs_auto_added = True
+
+            # ── SAVE ──────────────────────────────────────────────────────────
+            batch_rows = []
+            meta_data  = [
+                str(w_date), w_main_id, w_dtr_box, w_ss_no,
+                w_capacity, w_site, w_worker
+            ]
+            gps_data   = [w_lat, w_long]
+            box_item   = f"{w_meter_type} Box"
+
+            # Row 1: Box (always)
+            batch_rows.append(
+                [str(uuid.uuid4())] + meta_data +
+                [box_item, 1] + gps_data + ["FALSE"]
+            )
+            # Row 2: Cable (if entered)
             if qty_cable > 0:
-                batch_rows.append([str(uuid.uuid4())] + meta_data +
-                                  ["Cable", qty_cable] + gps_data + ["FALSE"])
-            if qty_lugs > 0:
-                batch_rows.append([str(uuid.uuid4())] + meta_data +
-                                  ["Lugs", qty_lugs] + gps_data + ["FALSE"])
+                batch_rows.append(
+                    [str(uuid.uuid4())] + meta_data +
+                    ["Cable", qty_cable] + gps_data + ["FALSE"]
+                )
+            # Row 3: Lugs (if cable entered — either explicit or auto-filled)
+            if effective_lugs > 0:
+                batch_rows.append(
+                    [str(uuid.uuid4())] + meta_data +
+                    ["Lugs", effective_lugs] + gps_data + ["FALSE"]
+                )
+
             try:
                 save_batch_rows("WorkLogs", batch_rows)
-                st.toast("✅ Log Saved!")
+                if lugs_auto_added:
+                    st.toast(
+                        f"✅ Log Saved!  "
+                        f"Auto-added {DEFAULT_LUGS_QTY} Lugs to match cable entry.",
+                        icon="ℹ️"
+                    )
+                else:
+                    st.toast("✅ Log Saved!")
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
@@ -355,16 +488,7 @@ with tabs[2]:
     ])
 
     # ─────────────────────────────────────────────────────────────────────────
-    # VIEW & MANAGE > SURVEY LOGS
-    #
-    # Tile layout (top→bottom):
-    #   📅 Date
-    #   🔌 DTR Code: X  ·  📡 DTR SS No: Y   ← always both labels
-    #   🔘 Switch  ·  👤 Lineman
-    #   📍 GPS  ·  Sync badge
-    #
-    # ✏️ on tile  → inline edit form
-    # 🗑️ section  → multiselect + confirm dialog
+    # VIEW & MANAGE › SURVEY LOGS  (unchanged)
     # ─────────────────────────────────────────────────────────────────────────
     with t_survey_view:
         if st.button("🔄 Refresh Data", key="ref_surv"):
@@ -402,7 +526,7 @@ with tabs[2]:
                 fs['Date'] = fs['Date'].dt.strftime('%Y-%m-%d')
                 st.markdown(f"**{len(fs)} record(s)**")
 
-                surv_delete_map = {}  # label → row_id
+                surv_delete_map = {}
 
                 for i, (_, row) in enumerate(fs.iterrows()):
                     dtr_code = str(row.get('DTR Code',     '')).strip()
@@ -420,19 +544,15 @@ with tabs[2]:
                         f"DTR: {dtr_code or '—'}  ·  SS: {dtr_ss or '—'}"
                     ] = row_id
 
-                    # ── Tile ─────────────────────────────────────────────────
                     with st.container(border=True):
                         col_c, col_btn = st.columns([7, 1])
 
                         with col_c:
-                            # Line 1: Date
                             st.markdown(f"**📅 {date_val}**")
-                            # Line 2: DTR Code · DTR SS No — always both labels
                             st.markdown(
                                 f"🔌 DTR Code: **{dtr_code or '—'}**  ·  "
                                 f"📡 DTR SS No: **{dtr_ss or '—'}**"
                             )
-                            # Line 3: Switch · Lineman
                             meta = []
                             if switch and switch != "None":
                                 meta.append(f"🔘 {switch}")
@@ -440,7 +560,6 @@ with tabs[2]:
                                 meta.append(f"👤 {lineman}")
                             if meta:
                                 st.caption("  ·  ".join(meta))
-                            # Line 4: GPS · Synced
                             badge = []
                             if lat and lon:
                                 badge.append(f"📍 {lat[:9]}, {lon[:9]}")
@@ -457,7 +576,6 @@ with tabs[2]:
                                 st.session_state[f'eo_surv_{i}'] = not is_open
                                 st.rerun()
 
-                        # ── Inline edit (inside same container) ──────────────
                         if st.session_state.get(f'eo_surv_{i}', False):
                             st.markdown("---")
                             with st.form(f"ef_surv_{i}"):
@@ -467,20 +585,16 @@ with tabs[2]:
                                 n_code    = st.text_input("DTR Code",   value=dtr_code)
                                 st.markdown("###### Switch Present")
                                 ec1, ec2  = st.columns(2)
-                                n_lc = ec1.checkbox("LC",
-                                                    value=(switch == 'LC'))
-                                n_ab = ec2.checkbox("AB Switch",
-                                                    value=(switch == 'AB Switch'))
+                                n_lc = ec1.checkbox("LC",        value=(switch == 'LC'))
+                                n_ab = ec2.checkbox("AB Switch", value=(switch == 'AB Switch'))
                                 n_lineman = st.text_input("Lineman Name", value=lineman)
                                 n_lat     = st.text_input("Latitude",     value=lat)
                                 n_lon     = st.text_input("Longitude",    value=lon)
                                 sc1, sc2  = st.columns(2)
-                                saved     = sc1.form_submit_button(
-                                    "💾 Save", type="primary",
-                                    use_container_width=True)
-                                cancelled = sc2.form_submit_button(
-                                    "✖ Cancel", use_container_width=True)
-
+                                saved     = sc1.form_submit_button("💾 Save",
+                                                type="primary", use_container_width=True)
+                                cancelled = sc2.form_submit_button("✖ Cancel",
+                                                use_container_width=True)
                             if saved:
                                 if n_lc and n_ab:
                                     st.error("⚠️ Select either LC or AB Switch, not both.")
@@ -501,26 +615,17 @@ with tabs[2]:
                                 st.session_state[f'eo_surv_{i}'] = False
                                 st.rerun()
 
-                # ── DELETE SECTION (bottom of tab) ────────────────────────────
                 st.markdown("---")
                 st.markdown("### 🗑️ Delete Survey Logs")
-                st.caption(
-                    "Select records from the list, then press Delete. "
-                    "A confirmation prompt will appear before anything is removed."
-                )
+                st.caption("Select records, then press Delete. A confirmation prompt will appear.")
 
                 del_sel_surv = st.multiselect(
-                    "Records to delete",
-                    list(surv_delete_map.keys()),
-                    key="del_sel_surv",
-                    label_visibility="collapsed",
+                    "Records to delete", list(surv_delete_map.keys()),
+                    key="del_sel_surv", label_visibility="collapsed",
                 )
-
                 if del_sel_surv:
-                    if st.button(
-                        f"🗑️ Delete {len(del_sel_surv)} record(s)",
-                        key="del_btn_surv",
-                    ):
+                    if st.button(f"🗑️ Delete {len(del_sel_surv)} record(s)",
+                                 key="del_btn_surv"):
                         st.session_state['confirm_del_surv'] = True
                         st.session_state['del_ids_surv'] = [
                             surv_delete_map[lbl] for lbl in del_sel_surv
@@ -530,16 +635,14 @@ with tabs[2]:
                     n_del = len(st.session_state.get('del_ids_surv', []))
                     st.warning(
                         f"⚠️ **Permanently delete {n_del} survey record(s)?**  \n"
-                        f"This action cannot be undone."
+                        "This action cannot be undone."
                     )
                     dc1, dc2 = st.columns(2)
                     with dc1:
                         if st.button("✅ Yes, Delete", key="conf_del_surv",
                                      type="primary", use_container_width=True):
-                            if bulk_delete_rows(
-                                "SurveyLogs",
-                                st.session_state['del_ids_surv']
-                            ):
+                            if bulk_delete_rows("SurveyLogs",
+                                                st.session_state['del_ids_surv']):
                                 st.session_state['confirm_del_surv'] = False
                                 st.session_state['del_ids_surv']     = []
                                 st.success("Deleted.")
@@ -551,28 +654,28 @@ with tabs[2]:
                             st.session_state['confirm_del_surv'] = False
                             st.session_state['del_ids_surv']     = []
                             st.rerun()
-
             else:
                 st.info("No logs match filters.")
         else:
             st.info("No Survey Logs available.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # VIEW & MANAGE > INSTALLATION LOGS
+    # VIEW & MANAGE › INSTALLATION LOGS
     #
-    # Tile layout (top→bottom):
-    #   📅 Date  ·  👷 Worker
-    #   🔌 DTR Code: X  ·  📡 DTR SS No: Y  [·  📦 Box: Z]
-    #   🔧 Materials
+    # Tile layout:
+    #   Line 1: 📅 Date  ·  👷 Worker
+    #   Line 2: 🔌 DTR Code: X  ·  📡 DTR SS No: Y  [·  📦 Box No: Z]
+    #   Line 3: 📦 DTR Box: 1  ·  🔌 Cable: 20m  ·  🔧 Lugs: 8   ← structured
+    #   Line 4: ⚠️ Lugs missing  [➕ Add 8 Lugs]                  ← if needed
     #
-    # GROUPING RULE:
-    #   Rows that share the same Date + Worker + DTR Code + SS No are merged
-    #   into one tile (multiple materials listed on line 3).
-    #   Rows where BOTH DTR Code AND SS No are blank each receive a unique
-    #   _grp_uid before groupby → they are NEVER merged, each gets its own tile.
+    # GROUPING:
+    #   Group by (Date, id_col, Worker, ss_col, box_col).
+    #   With DTR Code OR SS No now mandatory, each installation always has
+    #   at least one non-blank identifier → groupby is reliable.
+    #   Old blank-ID data: grouped best-effort by same key (may merge some).
     #
-    # ✏️ on tile  → inline edit form (edits shared metadata for all raw rows)
-    # 🗑️ section  → multiselect + confirm dialog
+    # ✏️ on tile  → inline edit (shared metadata for all rows in group)
+    # 🗑️ section  → multiselect + confirm dialog at bottom of tab
     # ─────────────────────────────────────────────────────────────────────────
     with t_view_logs:
         df = get_data("WorkLogs")
@@ -594,6 +697,7 @@ with tabs[2]:
             sel_box = c_f6.text_input("DTR Box No", key="wl_box")
             sel_ss  = c_f7.text_input("DTR SS No",  key="wl_ss")
 
+            # Apply filters
             fdf = df.copy()
             if sel_loc != "All":
                 fdf = fdf[fdf['Site'] == sel_loc]
@@ -612,8 +716,7 @@ with tabs[2]:
                 ]
 
             id_col  = ('SC No/ DTR Code'
-                       if 'SC No/ DTR Code' in fdf.columns
-                       else fdf.columns[2])
+                       if 'SC No/ DTR Code' in fdf.columns else fdf.columns[2])
             ss_col  = 'Transformer_SS_No' if 'Transformer_SS_No' in fdf.columns else None
             box_col = 'DTR_Box_No'         if 'DTR_Box_No'         in fdf.columns else None
 
@@ -632,61 +735,58 @@ with tabs[2]:
 
             if not fdf.empty:
                 fdf = fdf.copy()
-                fdf['DateStr']  = fdf['Date'].dt.strftime('%Y-%m-%d')
-                fdf['ItemDesc'] = (
-                    fdf['Material'].astype(str) +
-                    " (" + fdf['Qty'].astype(str) + ")"
-                )
+                fdf['DateStr'] = fdf['Date'].dt.strftime('%Y-%m-%d')
 
-                # ── Unique key for blank-ID rows (prevents accidental merging)
-                id_vals = fdf[id_col].astype(str).str.strip()
-                ss_vals = (fdf[ss_col].astype(str).str.strip()
-                           if ss_col else pd.Series('', index=fdf.index))
-                empty_mask = id_vals.eq('') & ss_vals.eq('')
-                fdf['_grp_uid'] = ''
-                if empty_mask.any():
-                    fdf.loc[empty_mask, '_grp_uid'] = [
-                        str(uuid.uuid4()) for _ in range(int(empty_mask.sum()))
-                    ]
-
-                group_cols = ['DateStr', id_col, 'Worker', '_grp_uid']
+                # Fill NAs in groupby columns
+                group_cols = ['DateStr', id_col, 'Worker']
                 if ss_col:  group_cols.append(ss_col)
                 if box_col: group_cols.append(box_col)
                 fdf[group_cols] = fdf[group_cols].fillna('')
 
+                # Group: collect list of raw row IDs per installation tile
                 grouped = (
                     fdf.groupby(group_cols, sort=False)
-                    .agg(ItemDesc=('ItemDesc', lambda x: ', '.join(x)),
-                         IDs=('ID', list))
+                    .agg(IDs=('ID', list))
                     .reset_index()
                 )
 
-                # Rename SS col for display
-                if ss_col and ss_col in grouped.columns:
-                    grouped.rename(columns={ss_col: '_ss_disp'}, inplace=True)
-                    ss_disp = '_ss_disp'
-                else:
-                    ss_disp = None
-
                 st.markdown(f"**{len(grouped)} installation tile(s)**")
 
-                wl_delete_map = {}  # label → list of raw row IDs
+                wl_delete_map = {}   # label → list[row_id]
 
-                for i, (_, row) in enumerate(grouped.iterrows()):
-                    date_val  = str(row.get('DateStr',   '')).strip()
-                    worker    = str(row.get('Worker',     '')).strip()
-                    dtr_code  = str(row.get(id_col,       '')).strip()
-                    dtr_ss    = str(row.get(ss_disp, '') if ss_disp else '').strip()
-                    box_no    = (str(row.get(box_col, '')).strip()
-                                 if box_col and box_col in row.index else '')
-                    materials = str(row.get('ItemDesc',   '')).strip()
-                    row_ids   = row['IDs']
+                for i, (_, grow) in enumerate(grouped.iterrows()):
+                    date_val = str(grow.get('DateStr', '')).strip()
+                    worker   = str(grow.get('Worker',  '')).strip()
+                    dtr_code = str(grow.get(id_col,    '')).strip()
+                    dtr_ss   = (str(grow.get(ss_col,  '')).strip()
+                                if ss_col else '')
+                    box_no   = (str(grow.get(box_col, '')).strip()
+                                if box_col and box_col in grow.index else '')
+                    row_ids  = grow['IDs']
 
-                    wl_delete_map[
+                    # ── Build mat_dict from the raw rows in this group ────────
+                    raw_rows = fdf[fdf['ID'].isin(row_ids)]
+                    mat_dict = {}
+                    for _, rr in raw_rows.iterrows():
+                        mat = str(rr['Material']).strip()
+                        try:
+                            qty = float(rr['Qty'])
+                        except:
+                            qty = 0.0
+                        mat_dict[mat] = mat_dict.get(mat, 0.0) + qty
+
+                    # First raw row for metadata used in fix-lugs save
+                    raw_first = raw_rows.iloc[0]
+
+                    mat_line   = format_mat_line(mat_dict)
+                    needs_fix  = tile_needs_lugs_fix(mat_dict)
+
+                    del_label = (
                         f"[{i+1}] {date_val}  ·  {worker}  ·  "
                         f"DTR: {dtr_code or '—'}  ·  SS: {dtr_ss or '—'}  ·  "
-                        f"{materials[:35]}"
-                    ] = row_ids
+                        f"{mat_line[:40]}"
+                    )
+                    wl_delete_map[del_label] = row_ids
 
                     # ── Tile ─────────────────────────────────────────────────
                     with st.container(border=True):
@@ -695,16 +795,54 @@ with tabs[2]:
                         with col_c:
                             # Line 1: Date · Worker
                             st.markdown(f"**📅 {date_val}**  ·  👷 {worker}")
-                            # Line 2: DTR Code · DTR SS No — always both labels
+
+                            # Line 2: DTR Code · SS No [· Box No] — always labels
                             line2 = [
                                 f"🔌 DTR Code: **{dtr_code or '—'}**",
                                 f"📡 DTR SS No: **{dtr_ss or '—'}**",
                             ]
                             if box_no:
-                                line2.append(f"📦 Box: {box_no}")
+                                line2.append(f"📦 Box No: {box_no}")
                             st.markdown("  ·  ".join(line2))
-                            # Line 3: Materials
-                            st.caption(f"🔧 {materials}")
+
+                            # Line 3: Structured materials
+                            st.caption(mat_line)
+
+                            # Line 4 (conditional): Missing-lugs warning + fix
+                            if needs_fix:
+                                lc1, lc2 = st.columns([3, 2])
+                                lc1.warning("⚠️ Lugs missing for this cable entry")
+                                if lc2.button(
+                                    f"➕ Add {DEFAULT_LUGS_QTY} Lugs",
+                                    key=f"fix_lugs_{i}",
+                                    help="Add default lugs qty to match cable entry",
+                                    use_container_width=True,
+                                ):
+                                    # Save new Lugs row using same metadata as this tile
+                                    lugs_row = {
+                                        "ID":               str(uuid.uuid4()),
+                                        "Date":             date_val,
+                                        id_col:             dtr_code,
+                                        "DTR_Box_No":       box_no,
+                                        "Transformer_SS_No": dtr_ss,
+                                        "Capacity":         str(raw_first.get('Capacity', '')),
+                                        "Site":             str(raw_first.get('Site', '')),
+                                        "Worker":           worker,
+                                        "Material":         "Lugs",
+                                        "Qty":              DEFAULT_LUGS_QTY,
+                                        "Latitude":         str(raw_first.get('Latitude',  '')),
+                                        "Longitude":        str(raw_first.get('Longitude', '')),
+                                        "Synced":           "FALSE",
+                                    }
+                                    try:
+                                        save_row("WorkLogs", lugs_row)
+                                        st.toast(
+                                            f"✅ Added {DEFAULT_LUGS_QTY} Lugs to this entry."
+                                        )
+                                        time.sleep(0.8)
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Could not add Lugs: {e}")
 
                         with col_btn:
                             is_open = st.session_state.get(f'eo_wl_{i}', False)
@@ -717,13 +855,12 @@ with tabs[2]:
                                 st.rerun()
 
                         # ── Inline edit ───────────────────────────────────────
-                        # Updates shared metadata for ALL raw rows in this group
                         if st.session_state.get(f'eo_wl_{i}', False):
                             st.markdown("---")
                             with st.form(f"ef_wl_{i}"):
                                 st.caption(
                                     f"Editing {len(row_ids)} material row(s) "
-                                    f"in this installation"
+                                    "in this installation"
                                 )
                                 n_date   = st.text_input("Date",       value=date_val)
                                 n_dtr    = st.text_input("DTR Code",   value=dtr_code)
@@ -731,8 +868,7 @@ with tabs[2]:
                                 n_box    = st.text_input("DTR Box No", value=box_no)
                                 w_idx    = (workers.index(worker)
                                             if worker in workers else 0)
-                                n_worker = st.selectbox("Worker",
-                                                        workers, index=w_idx)
+                                n_worker = st.selectbox("Worker", workers, index=w_idx)
                                 sc1, sc2 = st.columns(2)
                                 saved    = sc1.form_submit_button(
                                     "💾 Save", type="primary",
@@ -742,10 +878,10 @@ with tabs[2]:
 
                             if saved:
                                 u = {
-                                    "Date":    n_date,
-                                    id_col:    n_dtr,
-                                    "Worker":  n_worker,
-                                    "Synced":  "FALSE",
+                                    "Date":   n_date,
+                                    id_col:   n_dtr,
+                                    "Worker": n_worker,
+                                    "Synced": "FALSE",
                                 }
                                 if ss_col:  u[ss_col]  = n_ss
                                 if box_col: u[box_col] = n_box
@@ -762,7 +898,7 @@ with tabs[2]:
                                 st.session_state[f'eo_wl_{i}'] = False
                                 st.rerun()
 
-                # ── DELETE SECTION (bottom of tab) ────────────────────────────
+                # ── DELETE SECTION ────────────────────────────────────────────
                 st.markdown("---")
                 st.markdown("### 🗑️ Delete Installation Logs")
                 st.caption(
@@ -771,26 +907,21 @@ with tabs[2]:
                 )
 
                 del_sel_wl = st.multiselect(
-                    "Tiles to delete",
-                    list(wl_delete_map.keys()),
-                    key="del_sel_wl",
-                    label_visibility="collapsed",
+                    "Tiles to delete", list(wl_delete_map.keys()),
+                    key="del_sel_wl", label_visibility="collapsed",
                 )
 
                 if del_sel_wl:
                     flat_ids = [
-                        rid
-                        for lbl in del_sel_wl
-                        for rid in wl_delete_map[lbl]
+                        rid for lbl in del_sel_wl for rid in wl_delete_map[lbl]
                     ]
                     if st.button(
-                        f"🗑️ Delete {len(del_sel_wl)} tile(s) "
-                        f"({len(flat_ids)} row(s))",
+                        f"🗑️ Delete {len(del_sel_wl)} tile(s) ({len(flat_ids)} row(s))",
                         key="del_btn_wl",
                     ):
-                        st.session_state['confirm_del_wl'] = True
-                        st.session_state['del_ids_wl']     = flat_ids
-                        st.session_state['del_n_tiles_wl'] = len(del_sel_wl)
+                        st.session_state['confirm_del_wl']  = True
+                        st.session_state['del_ids_wl']      = flat_ids
+                        st.session_state['del_n_tiles_wl']  = len(del_sel_wl)
 
                 if st.session_state.get('confirm_del_wl', False):
                     n_rows  = len(st.session_state.get('del_ids_wl', []))
@@ -798,16 +929,14 @@ with tabs[2]:
                     st.warning(
                         f"⚠️ **Permanently delete {n_tiles} installation tile(s) "
                         f"({n_rows} material row(s) in total)?**  \n"
-                        f"This action cannot be undone."
+                        "This action cannot be undone."
                     )
                     dc1, dc2 = st.columns(2)
                     with dc1:
                         if st.button("✅ Yes, Delete", key="conf_del_wl",
                                      type="primary", use_container_width=True):
-                            if bulk_delete_rows(
-                                "WorkLogs",
-                                st.session_state['del_ids_wl']
-                            ):
+                            if bulk_delete_rows("WorkLogs",
+                                                st.session_state['del_ids_wl']):
                                 st.session_state['confirm_del_wl']  = False
                                 st.session_state['del_ids_wl']      = []
                                 st.session_state['del_n_tiles_wl']  = 0
@@ -828,7 +957,7 @@ with tabs[2]:
             st.info("No work logs available.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # VIEW & MANAGE > GPS DATA  (unchanged)
+    # VIEW & MANAGE › GPS DATA  (unchanged)
     # ─────────────────────────────────────────────────────────────────────────
     with t_gps:
         st.caption("View and export captured location data.")
@@ -869,22 +998,14 @@ with tabs[2]:
             st.warning("GPS columns not found in Sheet. Please update header row.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # VIEW & MANAGE > INVENTORY LOGS
-    #
-    # Tile layout (top→bottom):
-    #   📅 Date  ·  ⬆️ Inward / ⬇️ Outward
-    #   📦 Material: X  ·  🔢 Qty: Y   ← always both labels
-    #   🔄 Pending / ✅ Synced
-    #
-    # ✏️ on tile  → inline edit form
-    # 🗑️ section  → multiselect + confirm dialog
+    # VIEW & MANAGE › INVENTORY LOGS  (unchanged)
     # ─────────────────────────────────────────────────────────────────────────
     with t_inv_view:
         df_inv = get_data("Inventory")
         if not df_inv.empty:
             st.markdown(f"**{len(df_inv)} record(s)**")
 
-            inv_delete_map = {}  # label → row_id
+            inv_delete_map = {}
 
             for i, (_, row) in enumerate(df_inv.iterrows()):
                 date_val = str(row.get('Date',     '')).strip()
@@ -899,23 +1020,17 @@ with tabs[2]:
                     f"{material or '—'} ({qty or '—'})  ·  {inv_type}"
                 ] = row_id
 
-                # ── Tile ─────────────────────────────────────────────────────
                 with st.container(border=True):
                     col_c, col_btn = st.columns([7, 1])
 
                     with col_c:
-                        # Line 1: Date · Type
                         type_icon = "⬆️" if inv_type.lower() == "inward" else "⬇️"
                         st.markdown(f"**📅 {date_val}**  ·  {type_icon} {inv_type}")
-                        # Line 2: Material · Qty — always both labels
                         st.markdown(
                             f"📦 Material: **{material or '—'}**  ·  "
                             f"🔢 Qty: **{qty or '—'}**"
                         )
-                        # Line 3: Sync badge
-                        st.caption(
-                            "✅ Synced" if synced == "TRUE" else "🔄 Pending sync"
-                        )
+                        st.caption("✅ Synced" if synced == "TRUE" else "🔄 Pending sync")
 
                     with col_btn:
                         is_open = st.session_state.get(f'eo_inv_{i}', False)
@@ -927,7 +1042,6 @@ with tabs[2]:
                             st.session_state[f'eo_inv_{i}'] = not is_open
                             st.rerun()
 
-                    # ── Inline edit ───────────────────────────────────────────
                     if st.session_state.get(f'eo_inv_{i}', False):
                         st.markdown("---")
                         with st.form(f"ef_inv_{i}"):
@@ -939,21 +1053,16 @@ with tabs[2]:
                                        if material in materials_list else 0),
                             )
                             n_qty  = st.number_input(
-                                "Qty",
-                                value=(float(qty) if qty else 0.0),
+                                "Qty", value=(float(qty) if qty else 0.0)
                             )
                             ic1, ic2  = st.columns(2)
-                            saved     = ic1.form_submit_button(
-                                "💾 Save", type="primary",
-                                use_container_width=True)
-                            cancelled = ic2.form_submit_button(
-                                "✖ Cancel", use_container_width=True)
-
+                            saved     = ic1.form_submit_button("💾 Save",
+                                            type="primary", use_container_width=True)
+                            cancelled = ic2.form_submit_button("✖ Cancel",
+                                            use_container_width=True)
                         if saved:
-                            u = {
-                                "Date": n_date, "Material": n_mat,
-                                "Qty": n_qty, "Synced": "FALSE",
-                            }
+                            u = {"Date": n_date, "Material": n_mat,
+                                 "Qty": n_qty, "Synced": "FALSE"}
                             if update_row_data("Inventory", row_id, u):
                                 st.session_state[f'eo_inv_{i}'] = False
                                 st.success("Saved!")
@@ -963,26 +1072,17 @@ with tabs[2]:
                             st.session_state[f'eo_inv_{i}'] = False
                             st.rerun()
 
-            # ── DELETE SECTION (bottom of tab) ────────────────────────────────
             st.markdown("---")
             st.markdown("### 🗑️ Delete Inventory Records")
-            st.caption(
-                "Select records from the list, then press Delete. "
-                "A confirmation prompt will appear before anything is removed."
-            )
+            st.caption("Select records, then press Delete. A confirmation prompt will appear.")
 
             del_sel_inv = st.multiselect(
-                "Records to delete",
-                list(inv_delete_map.keys()),
-                key="del_sel_inv",
-                label_visibility="collapsed",
+                "Records to delete", list(inv_delete_map.keys()),
+                key="del_sel_inv", label_visibility="collapsed",
             )
-
             if del_sel_inv:
-                if st.button(
-                    f"🗑️ Delete {len(del_sel_inv)} record(s)",
-                    key="del_btn_inv",
-                ):
+                if st.button(f"🗑️ Delete {len(del_sel_inv)} record(s)",
+                             key="del_btn_inv"):
                     st.session_state['confirm_del_inv'] = True
                     st.session_state['del_ids_inv'] = [
                         inv_delete_map[lbl] for lbl in del_sel_inv
@@ -992,16 +1092,14 @@ with tabs[2]:
                 n_del = len(st.session_state.get('del_ids_inv', []))
                 st.warning(
                     f"⚠️ **Permanently delete {n_del} inventory record(s)?**  \n"
-                    f"This action cannot be undone."
+                    "This action cannot be undone."
                 )
                 dc1, dc2 = st.columns(2)
                 with dc1:
                     if st.button("✅ Yes, Delete", key="conf_del_inv",
                                  type="primary", use_container_width=True):
-                        if bulk_delete_rows(
-                            "Inventory",
-                            st.session_state['del_ids_inv']
-                        ):
+                        if bulk_delete_rows("Inventory",
+                                            st.session_state['del_ids_inv']):
                             st.session_state['confirm_del_inv'] = False
                             st.session_state['del_ids_inv']     = []
                             st.success("Deleted.")
@@ -1013,12 +1111,11 @@ with tabs[2]:
                         st.session_state['confirm_del_inv'] = False
                         st.session_state['del_ids_inv']     = []
                         st.rerun()
-
         else:
             st.info("No inventory logs available.")
 
 # =============================================================================
-# TAB 3 — INVENTORY (Add Stock)
+# TAB 3 — INVENTORY (Add Stock)  (unchanged)
 # =============================================================================
 with tabs[3]:
     st.subheader("📊 Stock Overview")
@@ -1056,7 +1153,7 @@ with tabs[3]:
             st.rerun()
 
 # =============================================================================
-# TAB 4 — WORKERS
+# TAB 4 — WORKERS  (unchanged)
 # =============================================================================
 with tabs[4]:
     st.subheader("👥 Workers")
