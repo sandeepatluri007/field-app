@@ -27,7 +27,7 @@ LOGO_FILE        = "logodesign4.jpg"
 DEFAULT_LUGS_QTY = 8   # auto-filled whenever cable is entered without lugs
 
 # =============================================================================
-# CONNECTION & DATA HELPERS
+# CONNECTION & DATA HELPERS (Optimized for Speed & Rate Limits)
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_connection():
@@ -45,37 +45,44 @@ def get_connection():
         st.error(f"❌ Connection Error: {e}")
         st.stop()
 
-def clear_cache():
-    st.cache_data.clear()
+@st.cache_resource(show_spinner=False, ttl=3600)
+def get_spreadsheet():
+    """Caches the spreadsheet object to eliminate redundant API handshakes."""
+    client = get_connection()
+    return client.open(SHEET_NAME)
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_data(worksheet):
-    client = get_connection()
+def get_data(worksheet_name):
+    """Fetches data with a smart retry mechanism to handle Google API rate limits."""
     try:
-        ws = client.open(SHEET_NAME).worksheet(worksheet)
+        ws = get_spreadsheet().worksheet(worksheet_name)
         return pd.DataFrame(ws.get_all_records())
-    except:
-        return pd.DataFrame()
+    except Exception as e:
+        # Smart Backoff to prevent blank data on rate limit hits
+        time.sleep(1.5)
+        try:
+            ws = get_spreadsheet().worksheet(worksheet_name)
+            return pd.DataFrame(ws.get_all_records())
+        except Exception as ex:
+            st.error(f"Failed to fetch {worksheet_name}. Please refresh.")
+            return pd.DataFrame()
 
-def save_batch_rows(worksheet, rows_list):
-    client = get_connection()
-    ws = client.open(SHEET_NAME).worksheet(worksheet)
+def save_batch_rows(worksheet_name, rows_list):
+    ws = get_spreadsheet().worksheet(worksheet_name)
     ws.append_rows(rows_list)
-    clear_cache()
+    get_data.clear(worksheet_name) # Targeted Cache Clear
 
-def save_row(worksheet, row_dict):
-    client = get_connection()
-    ws = client.open(SHEET_NAME).worksheet(worksheet)
-    headers    = ws.row_values(1)
+def save_row(worksheet_name, row_dict):
+    ws = get_spreadsheet().worksheet(worksheet_name)
+    headers = ws.row_values(1)
     row_values = [row_dict.get(h, "") for h in headers]
     ws.append_row(row_values)
-    clear_cache()
+    get_data.clear(worksheet_name) # Targeted Cache Clear
 
-def bulk_delete_rows(worksheet, id_list):
+def bulk_delete_rows(worksheet_name, id_list):
     if not id_list:
         return False
-    client = get_connection()
-    ws = client.open(SHEET_NAME).worksheet(worksheet)
+    ws = get_spreadsheet().worksheet(worksheet_name)
     try:
         cell_list = []
         for rid in id_list:
@@ -84,19 +91,14 @@ def bulk_delete_rows(worksheet, id_list):
         rows_to_delete = sorted(list(set(c.row for c in cell_list)), reverse=True)
         for r in rows_to_delete:
             ws.delete_rows(r)
-        clear_cache()
+        get_data.clear(worksheet_name) # Targeted Cache Clear
         return True
     except Exception as e:
         st.error(f"Delete Error: {e}")
         return False
 
-def update_row_data(worksheet, row_id, updated_data):
-    """
-    Update specific columns for the row identified by row_id.
-    Strips every header before matching to ensure data saves correctly.
-    """
-    client = get_connection()
-    ws = client.open(SHEET_NAME).worksheet(worksheet)
+def update_row_data(worksheet_name, row_id, updated_data):
+    ws = get_spreadsheet().worksheet(worksheet_name)
     try:
         cell           = ws.find(str(row_id))
         r              = cell.row
@@ -116,16 +118,9 @@ def update_row_data(worksheet, row_id, updated_data):
             else:
                 skipped.append(col_name_s)
 
-        if skipped:
-            st.warning(
-                f"⚠️ Column(s) not found in sheet and were skipped: "
-                f"{', '.join(skipped)}.  "
-                f"Check that your sheet header row matches exactly."
-            )
-
         if updates:
             ws.batch_update(updates)
-            clear_cache()
+            get_data.clear(worksheet_name) # Targeted Cache Clear
             return True
 
         st.error("Update failed: none of the target columns were found in the sheet.")
@@ -136,14 +131,13 @@ def update_row_data(worksheet, row_id, updated_data):
         return False
 
 def update_worker_registry(edited_df):
-    client  = get_connection()
-    ws      = client.open(SHEET_NAME).worksheet("Workers")
+    ws = get_spreadsheet().worksheet("Workers")
     headers = ws.row_values(1)
     if 'Synced' not in edited_df.columns:
         edited_df['Synced'] = "FALSE"
     ws.clear()
     ws.update([headers] + edited_df.values.tolist())
-    clear_cache()
+    get_data.clear("Workers")
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_settings_lists():
@@ -211,13 +205,14 @@ def generate_survey_pdf(df_export):
 # --- Robust Column Matcher ---
 def resolve_col(columns, candidates):
     """Intelligently matches sheet headers regardless of underscores or slight variations."""
-    for col in columns:
-        if str(col).strip().lower() in [cand.lower() for cand in candidates]:
-            return col
+    columns_lower = {str(col).strip().lower(): col for col in columns}
+    for cand in candidates:
+        if cand.lower() in columns_lower:
+            return columns_lower[cand.lower()]
     return None
 
 # =============================================================================
-# MATERIAL DISPLAY HELPERS  (used in Installation Logs tiles)
+# MATERIAL DISPLAY HELPERS
 # =============================================================================
 def _qty_str(qty, unit=""):
     try:
@@ -326,7 +321,7 @@ with tabs[0]:
                 try:
                     save_row("SurveyLogs", payload)
                     st.toast("✅ Survey Log Saved!")
-                    time.sleep(1)
+                    time.sleep(0.3)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Save Failed: {e}")
@@ -462,14 +457,10 @@ with tabs[1]:
             try:
                 save_batch_rows("WorkLogs", batch_rows)
                 if lugs_auto_added:
-                    st.toast(
-                        f"✅ Log Saved!  "
-                        f"Auto-added {DEFAULT_LUGS_QTY} Lugs to match cable entry.",
-                        icon="ℹ️"
-                    )
+                    st.toast(f"✅ Log Saved! Auto-added {DEFAULT_LUGS_QTY} Lugs.", icon="ℹ️")
                 else:
                     st.toast("✅ Log Saved!")
-                time.sleep(1)
+                time.sleep(0.3)
                 st.rerun()
             except Exception as e:
                 st.error(f"Save Failed: {e}")
@@ -489,7 +480,7 @@ with tabs[2]:
     # ─────────────────────────────────────────────────────────────────────────
     with t_survey_view:
         if st.button("🔄 Refresh Data", key="ref_surv"):
-            clear_cache()
+            get_data.clear("SurveyLogs")
             st.rerun()
 
         if not survey_data.empty:
@@ -608,7 +599,7 @@ with tabs[2]:
                                     if update_row_data("SurveyLogs", row_id, u):
                                         st.session_state[f'eo_surv_{i}'] = False
                                         st.success("Saved!")
-                                        time.sleep(0.8)
+                                        time.sleep(0.3)
                                         st.rerun()
                             if cancelled:
                                 st.session_state[f'eo_surv_{i}'] = False
@@ -645,7 +636,7 @@ with tabs[2]:
                                 st.session_state['confirm_del_surv'] = False
                                 st.session_state['del_ids_surv']     = []
                                 st.success("Deleted.")
-                                time.sleep(0.8)
+                                time.sleep(0.3)
                                 st.rerun()
                     with dc2:
                         if st.button("❌ Cancel", key="cancel_del_surv",
@@ -683,18 +674,14 @@ with tabs[2]:
 
             df[meta_cols] = df[meta_cols].fillna('')
             
-            # To fix the missing Lugs grouping issue, we sort purely by the metadata AND OriginalIndex
-            # This ensures even if a Lugs row is added 5 days later, it snaps adjacent to its Box/Cable parents.
             df['OriginalIndex'] = range(len(df))
             sort_cols = meta_cols + ['OriginalIndex']
             df = df.sort_values(by=sort_cols)
 
-            # Now adjacent identical metadata represents a single group
             metadata_changed = (df[meta_cols] != df[meta_cols].shift()).any(axis=1)
             is_box = df['Material'].astype(str).str.contains('Box', case=False, na=False)
             df['_sub_grp'] = (metadata_changed | is_box).cumsum()
             
-            # Sort for final display: Newest Date -> Newest SubGroup -> Original Box/Cable/Lugs sequence
             df = df.sort_values(by=['Date', '_sub_grp', 'OriginalIndex'], ascending=[False, False, True])
 
             st.markdown("###### Filters")
@@ -711,7 +698,6 @@ with tabs[2]:
             sel_box = c_f6.text_input("DTR Box No", key="wl_box")
             sel_ss  = c_f7.text_input("DTR SS No",  key="wl_ss")
 
-            # Apply filters
             fdf = df.copy()
             if sel_loc != "All":
                 fdf = fdf[fdf['Site'] == sel_loc]
@@ -748,7 +734,6 @@ with tabs[2]:
                 if ss_col: group_cols_to_agg.append(ss_col)
                 if box_col: group_cols_to_agg.append(box_col)
 
-                # Group
                 grouped = (
                     fdf.groupby(group_cols_to_agg, sort=False)
                     .agg(IDs=('ID', list))
@@ -767,7 +752,6 @@ with tabs[2]:
                     box_no   = str(grow.get(box_col,   '')).strip() if box_col and box_col in grow.index else ''
                     row_ids  = grow['IDs']
 
-                    # Extract materials for visual
                     raw_rows = fdf[fdf['ID'].isin(row_ids)]
                     mat_dict = {}
                     for _, rr in raw_rows.iterrows():
@@ -789,7 +773,6 @@ with tabs[2]:
                     )
                     wl_delete_map[del_label] = row_ids
 
-                    # ── Tile ─────────────────────────────────────────────────
                     with st.container(border=True):
                         col_c, col_btn = st.columns([7, 1])
 
@@ -831,7 +814,7 @@ with tabs[2]:
                                     try:
                                         save_row("WorkLogs", lugs_row)
                                         st.toast(f"✅ Added {DEFAULT_LUGS_QTY} Lugs to this entry.")
-                                        time.sleep(0.8)
+                                        time.sleep(0.3)
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"Could not add Lugs: {e}")
@@ -846,7 +829,6 @@ with tabs[2]:
                                 st.session_state[f'eo_wl_{i}'] = not is_open
                                 st.rerun()
 
-                        # ── Inline edit ───────────────────────────────────────
                         if st.session_state.get(f'eo_wl_{i}', False):
                             st.markdown("---")
 
@@ -857,7 +839,6 @@ with tabs[2]:
                                 except: qty_r = 0.0
                                 mat_to_row[mat] = {'row_id': str(rr['ID']), 'qty': qty_r}
 
-                            # Inject missing standard materials for easy adding
                             if not any('cable' in k.lower() for k in mat_to_row.keys()):
                                 mat_to_row['Cable'] = {'row_id': 'NEW_CABLE', 'qty': 0.0}
                             if not any('lugs' in k.lower() for k in mat_to_row.keys()):
@@ -902,7 +883,6 @@ with tabs[2]:
                                 if box_col: meta_update[box_col] = n_box
                                 if cap_col: meta_update[cap_col] = n_cap
 
-                                # Push metadata updates to existing rows
                                 meta_ok = all(update_row_data("WorkLogs", rid, meta_update) for rid in row_ids)
                                 
                                 qty_ok = True
@@ -932,14 +912,13 @@ with tabs[2]:
                                         if not update_row_data("WorkLogs", rid, {"Qty": new_qty}):
                                             qty_ok = False
 
-                                # Save any newly added materials (like missing Lugs)
                                 for new_r in new_rows_to_save:
                                     save_row("WorkLogs", new_r)
 
                                 if meta_ok and qty_ok:
                                     st.session_state[f'eo_wl_{i}'] = False
                                     st.success("Saved!")
-                                    time.sleep(0.8)
+                                    time.sleep(0.3)
                                     st.rerun()
                                 else:
                                     st.error("Some fields may not have saved. Check the warnings above.")
@@ -948,7 +927,6 @@ with tabs[2]:
                                 st.session_state[f'eo_wl_{i}'] = False
                                 st.rerun()
 
-                # ── DELETE SECTION ────────────────────────────────────────────
                 st.markdown("---")
                 st.markdown("### 🗑️ Delete Installation Logs")
                 st.caption(
@@ -991,7 +969,7 @@ with tabs[2]:
                                 st.session_state['del_ids_wl']      = []
                                 st.session_state['del_n_tiles_wl']  = 0
                                 st.success("Deleted.")
-                                time.sleep(0.8)
+                                time.sleep(0.3)
                                 st.rerun()
                     with dc2:
                         if st.button("❌ Cancel", key="cancel_del_wl",
@@ -1056,6 +1034,10 @@ with tabs[2]:
     # VIEW & MANAGE › INVENTORY LOGS 
     # ─────────────────────────────────────────────────────────────────────────
     with t_inv_view:
+        if st.button("🔄 Refresh Inventory Data", key="ref_inv"):
+            get_data.clear("Inventory")
+            st.rerun()
+
         df_inv = get_data("Inventory")
         if not df_inv.empty:
             if 'Date' in df_inv.columns:
@@ -1127,7 +1109,7 @@ with tabs[2]:
                             if update_row_data("Inventory", row_id, u):
                                 st.session_state[f'eo_inv_{i}'] = False
                                 st.success("Saved!")
-                                time.sleep(0.8)
+                                time.sleep(0.3)
                                 st.rerun()
                         if cancelled:
                             st.session_state[f'eo_inv_{i}'] = False
@@ -1164,7 +1146,7 @@ with tabs[2]:
                             st.session_state['confirm_del_inv'] = False
                             st.session_state['del_ids_inv']     = []
                             st.success("Deleted.")
-                            time.sleep(0.8)
+                            time.sleep(0.3)
                             st.rerun()
                 with dc2:
                     if st.button("❌ Cancel", key="cancel_del_inv",
@@ -1210,7 +1192,7 @@ with tabs[3]:
             }
             save_row("Inventory", payload)
             st.toast(f"✅ Added {i_qty} {i_mat}")
-            time.sleep(1)
+            time.sleep(0.3)
             st.rerun()
 
 # =============================================================================
@@ -1218,6 +1200,10 @@ with tabs[3]:
 # =============================================================================
 with tabs[4]:
     st.subheader("👥 Workers")
+    if st.button("🔄 Refresh Data", key="ref_work"):
+        get_data.clear("Workers")
+        st.rerun()
+
     with st.expander("➕ Add Worker"):
         with st.form("add_worker"):
             new_w = st.text_input("Name")
@@ -1237,4 +1223,6 @@ with tabs[4]:
         )
         if st.button("💾 Save List"):
             update_worker_registry(edited)
+            st.toast("✅ Workers updated")
+            time.sleep(0.3)
             st.rerun()
