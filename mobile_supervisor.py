@@ -7,6 +7,7 @@ import uuid
 import time
 import os
 import urllib.parse
+import io
 
 # --- IMPORTS ---
 try:
@@ -47,18 +48,15 @@ def get_connection():
 
 @st.cache_resource(show_spinner=False, ttl=3600)
 def get_spreadsheet():
-    """Caches the spreadsheet object to eliminate redundant API handshakes."""
     client = get_connection()
     return client.open(SHEET_NAME)
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_data(worksheet_name):
-    """Fetches data with a smart retry mechanism to handle Google API rate limits."""
     try:
         ws = get_spreadsheet().worksheet(worksheet_name)
         return pd.DataFrame(ws.get_all_records())
     except Exception as e:
-        # Smart Backoff to prevent blank data on rate limit hits
         time.sleep(1.5)
         try:
             ws = get_spreadsheet().worksheet(worksheet_name)
@@ -70,14 +68,14 @@ def get_data(worksheet_name):
 def save_batch_rows(worksheet_name, rows_list):
     ws = get_spreadsheet().worksheet(worksheet_name)
     ws.append_rows(rows_list)
-    get_data.clear(worksheet_name) # Targeted Cache Clear
+    get_data.clear(worksheet_name)
 
 def save_row(worksheet_name, row_dict):
     ws = get_spreadsheet().worksheet(worksheet_name)
     headers = ws.row_values(1)
     row_values = [row_dict.get(h, "") for h in headers]
     ws.append_row(row_values)
-    get_data.clear(worksheet_name) # Targeted Cache Clear
+    get_data.clear(worksheet_name)
 
 def bulk_delete_rows(worksheet_name, id_list):
     if not id_list:
@@ -91,7 +89,7 @@ def bulk_delete_rows(worksheet_name, id_list):
         rows_to_delete = sorted(list(set(c.row for c in cell_list)), reverse=True)
         for r in rows_to_delete:
             ws.delete_rows(r)
-        get_data.clear(worksheet_name) # Targeted Cache Clear
+        get_data.clear(worksheet_name)
         return True
     except Exception as e:
         st.error(f"Delete Error: {e}")
@@ -120,7 +118,7 @@ def update_row_data(worksheet_name, row_id, updated_data):
 
         if updates:
             ws.batch_update(updates)
-            get_data.clear(worksheet_name) # Targeted Cache Clear
+            get_data.clear(worksheet_name)
             return True
 
         st.error("Update failed: none of the target columns were found in the sheet.")
@@ -174,9 +172,19 @@ def calculate_stock():
             stock[mat] = stock.get(mat, 0.0) - qty
     return stock
 
+# --- EXPORT HELPERS ---
+def convert_df_to_excel(df):
+    output = io.BytesIO()
+    try:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Exported Data')
+        return output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"
+    except ImportError:
+        # Fallback to CSV if xlsxwriter is missing
+        return df.to_csv(index=False).encode('utf-8'), "text/csv", "csv"
+
 def generate_survey_pdf(df_export):
-    if FPDF is None:
-        return None
+    if FPDF is None: return None
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -193,18 +201,53 @@ def generate_survey_pdf(df_export):
         loc_link = (f"https://maps.google.com/?q={lat},{lon}"
                     if lat and lon else "No Location Provided")
         pdf.set_font("Arial", 'B', 10)
-        pdf.cell(200, 8,
-                 txt=f"DTR SS No: {dtr_name} (Code: {dtr_code}) | Date: {date_val}",
-                 ln=True)
+        pdf.cell(200, 8, txt=f"DTR SS No: {dtr_name} (Code: {dtr_code}) | Date: {date_val}", ln=True)
         pdf.set_font("Arial", '', 10)
         pdf.cell(200, 8, txt=f"Switch: {lc_val} | Lineman: {lm_val}", ln=True)
         pdf.cell(200, 8, txt=f"Location: {loc_link}", ln=True)
         pdf.ln(5)
     return pdf.output(dest='S').encode('latin-1')
 
+def generate_worklog_pdf(df_export, id_col, ss_col, box_col):
+    if FPDF is None: return None
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="Installation Logs Export", ln=True, align='C')
+    pdf.ln(5)
+    for _, row in df_export.iterrows():
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(200, 8, txt=f"Date: {row['Date']} | Worker: {row['Worker']}", ln=True)
+        pdf.set_font("Arial", '', 10)
+        
+        info_line = []
+        if id_col and row.get(id_col): info_line.append(f"DTR Code: {row[id_col]}")
+        if ss_col and row.get('DTR SS No'): info_line.append(f"SS No: {row['DTR SS No']}")
+        if box_col and row.get(box_col): info_line.append(f"Box: {row[box_col]}")
+        
+        pdf.cell(200, 8, txt=" | ".join(info_line), ln=True)
+        pdf.cell(200, 8, txt=f"Materials: {row['Materials Consumed']}", ln=True)
+        pdf.ln(5)
+    return pdf.output(dest='S').encode('latin-1')
+
+def generate_inventory_pdf(df_export):
+    if FPDF is None: return None
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="Inventory Logs Export", ln=True, align='C')
+    pdf.ln(5)
+    for _, row in df_export.iterrows():
+        pdf.set_font("Arial", 'B', 10)
+        type_str = row.get('Type', 'Inward')
+        pdf.cell(200, 8, txt=f"Date: {row['Date']} | Type: {type_str}", ln=True)
+        pdf.set_font("Arial", '', 10)
+        pdf.cell(200, 8, txt=f"Material: {row['Material']} | Qty: {row['Qty']}", ln=True)
+        pdf.ln(3)
+    return pdf.output(dest='S').encode('latin-1')
+
 # --- Robust Column Matcher ---
 def resolve_col(columns, candidates):
-    """Intelligently matches sheet headers regardless of underscores or slight variations."""
     columns_lower = {str(col).strip().lower(): col for col in columns}
     for cand in candidates:
         if cand.lower() in columns_lower:
@@ -327,7 +370,7 @@ with tabs[0]:
                     st.error(f"Save Failed: {e}")
 
 # =============================================================================
-# TAB 1 — LOG WORK
+# TAB 1 — LOG WORK (Rearranged Layout)
 # =============================================================================
 with tabs[1]:
     st.markdown("##### 1. Asset Type")
@@ -348,36 +391,28 @@ with tabs[1]:
 
     with st.form("work_log", clear_on_submit=True):
         st.markdown("##### 2. Installation Details")
+        
+        # New Layout Order: Date, Site, Worker -> Box No, SS No -> DTR Code, Capacity
         c1, c2, c3 = st.columns([1, 1, 1])
         w_date   = c1.date_input("Date",   datetime.today())
         w_site   = c2.selectbox("Site",    sites_list)
         w_worker = c3.selectbox("Worker",  workers)
 
-        c4, c5    = st.columns(2)
-        w_main_id = c4.text_input(
-            id_label,
-            help=("DTR Code for this installation. "
-                  "Required unless DTR SS No is entered below.")
-            if is_dtr else "Service Number is required."
-        )
-        w_dtr_box = w_ss_no = w_capacity = ""
+        w_dtr_box = w_ss_no = w_capacity = w_main_id = ""
+
         if is_dtr:
-            w_dtr_box  = c5.text_input("DTR Box No",
-                                        help="Box serial / reference number (optional)")
-            c6, c7     = st.columns(2)
-            w_ss_no    = c6.text_input(
-                "DTR SS No",
-                help="Sub-station number. Required if DTR Code is left blank."
-            )
+            c4, c5 = st.columns(2)
+            w_dtr_box = c4.text_input("DTR Box No", help="Box serial / reference number")
+            w_ss_no   = c5.text_input("DTR SS No", help="Sub-station number")
+
+            c6, c7 = st.columns(2)
+            w_main_id  = c6.text_input("DTR Code", help="DTR Code for this installation")
             w_capacity = c7.text_input("Transformer Capacity (KVA)")
 
             if not w_main_id.strip() and not w_ss_no.strip():
-                st.caption(
-                    "⚠️ Enter at least **DTR Code** or **DTR SS No** "
-                    "to submit this log."
-                )
+                st.caption("⚠️ Enter at least **DTR Code** or **DTR SS No** to submit this log.")
         else:
-            c5.write("")
+            w_main_id = st.text_input("Service Number", help="Service Number is required.")
 
         surv_lat = surv_lon = ""
         if w_main_id and not survey_data.empty and 'DTR Code' in survey_data.columns:
@@ -413,11 +448,7 @@ with tabs[1]:
 
         if is_dtr:
             if not w_main_id.strip() and not w_ss_no.strip():
-                st.error(
-                    "⚠️ **DTR installation requires at least one identifier.** \n"
-                    "Please enter either **DTR Code** or **DTR SS No** (or both) "
-                    "before submitting."
-                )
+                st.error("⚠️ **DTR installation requires at least one identifier.** \nPlease enter either **DTR Code** or **DTR SS No** (or both).")
                 validation_ok = False
         else:
             if not w_main_id.strip():
@@ -492,8 +523,7 @@ with tabs[2]:
             st.markdown("###### Filters")
             cf1, cf2, cf3 = st.columns(3)
             surv_search = cf1.text_input("Search DTR Code / DTR SS No")
-            surv_switch = cf2.selectbox("Switch Type",
-                                        ["All", "LC", "AB Switch", "None"])
+            surv_switch = cf2.selectbox("Switch Type", ["All", "LC", "AB Switch", "None"])
             surv_date   = cf3.date_input("Date Range", [])
 
             fs = survey_data.copy()
@@ -514,8 +544,23 @@ with tabs[2]:
             if not fs.empty:
                 fs = fs.copy()
                 fs['Date'] = fs['Date'].dt.strftime('%Y-%m-%d')
-                st.markdown(f"**{len(fs)} record(s)**")
+                
+                # Excel & PDF Export (Survey Logs)
+                st.write("### 📤 Export Filtered Logs")
+                ce_s1, ce_s2 = st.columns(2)
+                display_cols = [c for c in fs.columns if c not in ["Synced", "RowIndex", "ID"]]
+                display_df = fs[display_cols].rename(columns={'DTR Name': 'DTR SS No'})
+                
+                with ce_s1:
+                    if FPDF:
+                        pdf_data = generate_survey_pdf(fs)
+                        st.download_button("⬇️ Download PDF", data=pdf_data, file_name="Survey_Logs.pdf", mime="application/pdf")
+                with ce_s2:
+                    excel_data, mime_type, ext = convert_df_to_excel(display_df)
+                    st.download_button(f"⬇️ Download Excel (.{ext})", data=excel_data, file_name=f"Survey_Logs.{ext}", mime=mime_type)
 
+                st.markdown("---")
+                st.markdown(f"**{len(fs)} record(s)**")
                 surv_delete_map = {}
 
                 for i, (_, row) in enumerate(fs.iterrows()):
@@ -529,40 +574,26 @@ with tabs[2]:
                     synced   = str(row.get('Synced',       '')).strip().upper()
                     row_id   = str(row['ID'])
 
-                    surv_delete_map[
-                        f"[{i+1}] {date_val}  ·  "
-                        f"DTR: {dtr_code or '—'}  ·  SS: {dtr_ss or '—'}"
-                    ] = row_id
+                    surv_delete_map[f"[{i+1}] {date_val}  ·  DTR: {dtr_code or '—'}  ·  SS: {dtr_ss or '—'}"] = row_id
 
                     with st.container(border=True):
                         col_c, col_btn = st.columns([7, 1])
 
                         with col_c:
                             st.markdown(f"**📅 {date_val}**")
-                            st.markdown(
-                                f"🔌 DTR Code: **{dtr_code or '—'}** ·  "
-                                f"📡 DTR SS No: **{dtr_ss or '—'}**"
-                            )
+                            st.markdown(f"🔌 DTR Code: **{dtr_code or '—'}** ·  📡 DTR SS No: **{dtr_ss or '—'}**")
                             meta = []
-                            if switch and switch != "None":
-                                meta.append(f"🔘 {switch}")
-                            if lineman:
-                                meta.append(f"👤 {lineman}")
-                            if meta:
-                                st.caption("  ·  ".join(meta))
+                            if switch and switch != "None": meta.append(f"🔘 {switch}")
+                            if lineman: meta.append(f"👤 {lineman}")
+                            if meta: st.caption("  ·  ".join(meta))
                             badge = []
-                            if lat and lon:
-                                badge.append(f"📍 {lat[:9]}, {lon[:9]}")
+                            if lat and lon: badge.append(f"📍 {lat[:9]}, {lon[:9]}")
                             badge.append("✅ Synced" if synced == "TRUE" else "🔄 Pending")
                             st.caption("  ·  ".join(badge))
 
                         with col_btn:
                             is_open = st.session_state.get(f'eo_surv_{i}', False)
-                            if st.button(
-                                "✖" if is_open else "✏️",
-                                key=f"eb_surv_{i}",
-                                help="Close" if is_open else "Edit"
-                            ):
+                            if st.button("✖" if is_open else "✏️", key=f"eb_surv_{i}", help="Close" if is_open else "Edit"):
                                 st.session_state[f'eo_surv_{i}'] = not is_open
                                 st.rerun()
 
@@ -581,10 +612,8 @@ with tabs[2]:
                                 n_lat     = st.text_input("Latitude",     value=lat)
                                 n_lon     = st.text_input("Longitude",    value=lon)
                                 sc1, sc2  = st.columns(2)
-                                saved     = sc1.form_submit_button("💾 Save",
-                                                type="primary", use_container_width=True)
-                                cancelled = sc2.form_submit_button("✖ Cancel",
-                                                use_container_width=True)
+                                saved     = sc1.form_submit_button("💾 Save", type="primary", use_container_width=True)
+                                cancelled = sc2.form_submit_button("✖ Cancel", use_container_width=True)
                             if saved:
                                 if n_lc and n_ab:
                                     st.error("⚠️ Select either LC or AB Switch, not both.")
@@ -607,40 +636,28 @@ with tabs[2]:
 
                 st.markdown("---")
                 st.markdown("### 🗑️ Delete Survey Logs")
-                st.caption("Select records, then press Delete. A confirmation prompt will appear.")
+                st.caption("Select records, then press Delete.")
 
-                del_sel_surv = st.multiselect(
-                    "Records to delete", list(surv_delete_map.keys()),
-                    key="del_sel_surv", label_visibility="collapsed",
-                )
+                del_sel_surv = st.multiselect("Records to delete", list(surv_delete_map.keys()), key="del_sel_surv", label_visibility="collapsed")
                 if del_sel_surv:
-                    if st.button(f"🗑️ Delete {len(del_sel_surv)} record(s)",
-                                 key="del_btn_surv"):
+                    if st.button(f"🗑️ Delete {len(del_sel_surv)} record(s)", key="del_btn_surv"):
                         st.session_state['confirm_del_surv'] = True
-                        st.session_state['del_ids_surv'] = [
-                            surv_delete_map[lbl] for lbl in del_sel_surv
-                        ]
+                        st.session_state['del_ids_surv'] = [surv_delete_map[lbl] for lbl in del_sel_surv]
 
                 if st.session_state.get('confirm_del_surv', False):
                     n_del = len(st.session_state.get('del_ids_surv', []))
-                    st.warning(
-                        f"⚠️ **Permanently delete {n_del} survey record(s)?** \n"
-                        "This action cannot be undone."
-                    )
+                    st.warning(f"⚠️ **Permanently delete {n_del} survey record(s)?** \nThis action cannot be undone.")
                     dc1, dc2 = st.columns(2)
                     with dc1:
-                        if st.button("✅ Yes, Delete", key="conf_del_surv",
-                                     type="primary", use_container_width=True):
-                            if bulk_delete_rows("SurveyLogs",
-                                                st.session_state['del_ids_surv']):
+                        if st.button("✅ Yes, Delete", key="conf_del_surv", type="primary", use_container_width=True):
+                            if bulk_delete_rows("SurveyLogs", st.session_state['del_ids_surv']):
                                 st.session_state['confirm_del_surv'] = False
                                 st.session_state['del_ids_surv']     = []
                                 st.success("Deleted.")
                                 time.sleep(0.3)
                                 st.rerun()
                     with dc2:
-                        if st.button("❌ Cancel", key="cancel_del_surv",
-                                     use_container_width=True):
+                        if st.button("❌ Cancel", key="cancel_del_surv", use_container_width=True):
                             st.session_state['confirm_del_surv'] = False
                             st.session_state['del_ids_surv']     = []
                             st.rerun()
@@ -653,11 +670,14 @@ with tabs[2]:
     # VIEW & MANAGE › INSTALLATION LOGS
     # ─────────────────────────────────────────────────────────────────────────
     with t_view_logs:
+        if st.button("🔄 Refresh Data", key="ref_wl"):
+            get_data.clear("WorkLogs")
+            st.rerun()
+
         df = get_data("WorkLogs")
         if not df.empty:
             df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
 
-            # ── ROBUST COLUMN MATCHING ──
             id_col  = resolve_col(df.columns, ['SC No/ DTR Code', 'DTR Code', 'Service Number'])
             if not id_col and len(df.columns) > 2: id_col = df.columns[2]
 
@@ -685,22 +705,17 @@ with tabs[2]:
             df = df.sort_values(by=['Date', '_sub_grp', 'OriginalIndex'], ascending=[False, False, True])
 
             st.markdown("###### Filters")
-            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
-            avail_sites   = ["All"] + sorted(df['Site'].dropna().unique().tolist())
-            sel_loc       = c_f1.selectbox("Location (Site)", avail_sites, key="wl_loc")
-            sel_mat       = c_f2.text_input("Type / Material",
-                                            placeholder="e.g. Cable, Box")
+            c_f1, c_f2, c_f3 = st.columns(3)
             avail_workers = ["All"] + sorted(df['Worker'].dropna().unique().tolist())
-            sel_worker    = c_f3.selectbox("Worker", avail_workers, key="wl_worker")
-            sel_date      = c_f4.date_input("Date Range", [], key="wl_date")
-            c_f5, c_f6, c_f7 = st.columns(3)
-            sel_dtr = c_f5.text_input("DTR Code",   key="wl_dtr")
-            sel_box = c_f6.text_input("DTR Box No", key="wl_box")
-            sel_ss  = c_f7.text_input("DTR SS No",  key="wl_ss")
+            sel_worker    = c_f1.selectbox("Worker", avail_workers, key="wl_worker")
+            sel_date      = c_f2.date_input("Date Range", [], key="wl_date")
+            sel_dtr       = c_f3.text_input("DTR Code",   key="wl_dtr")
+            
+            c_f4, c_f5 = st.columns(2)
+            sel_box = c_f4.text_input("DTR Box No", key="wl_box")
+            sel_ss  = c_f5.text_input("DTR SS No",  key="wl_ss")
 
             fdf = df.copy()
-            if sel_loc != "All":
-                fdf = fdf[fdf['Site'] == sel_loc]
             if sel_worker != "All":
                 fdf = fdf[fdf['Worker'] == sel_worker]
             if len(sel_date) == 2:
@@ -709,24 +724,13 @@ with tabs[2]:
                     (fdf['Date'].dt.date <= sel_date[1])
                 )
                 fdf = fdf[mask]
-            if sel_mat:
-                fdf = fdf[
-                    fdf['Material'].astype(str).str.contains(
-                        sel_mat, case=False, na=False)
-                ]
 
             if sel_dtr and id_col:
-                fdf = fdf[
-                    fdf[id_col].astype(str).str.contains(sel_dtr, case=False, na=False)
-                ]
+                fdf = fdf[fdf[id_col].astype(str).str.contains(sel_dtr, case=False, na=False)]
             if sel_box and box_col:
-                fdf = fdf[
-                    fdf[box_col].astype(str).str.contains(sel_box, case=False, na=False)
-                ]
+                fdf = fdf[fdf[box_col].astype(str).str.contains(sel_box, case=False, na=False)]
             if sel_ss and ss_col:
-                fdf = fdf[
-                    fdf[ss_col].astype(str).str.contains(sel_ss, case=False, na=False)
-                ]
+                fdf = fdf[fdf[ss_col].astype(str).str.contains(sel_ss, case=False, na=False)]
 
             if not fdf.empty:
                 group_cols_to_agg = ['_sub_grp', 'DateStr', 'Worker']
@@ -739,31 +743,54 @@ with tabs[2]:
                     .agg(IDs=('ID', list))
                     .reset_index()
                 )
+                
+                # Fetch formatted string for export & UI
+                grouped['Materials Consumed'] = grouped['IDs'].apply(lambda ids: format_mat_line({
+                    str(rr['Material']).strip(): float(rr['Qty']) if str(rr['Qty']).replace('.','').isdigit() else 0.0
+                    for _, rr in fdf[fdf['ID'].isin(ids)].iterrows()
+                }))
+                
+                grouped.rename(columns={'DateStr': 'Date'}, inplace=True)
+                if ss_col: grouped.rename(columns={ss_col: 'DTR SS No'}, inplace=True)
+
+                # Excel & PDF Export (Installation Logs)
+                st.write("### 📤 Export Filtered Logs")
+                ce_w1, ce_w2 = st.columns(2)
+                
+                exp_cols = ['Date', 'Worker']
+                if id_col: exp_cols.append(id_col)
+                if ss_col: exp_cols.append('DTR SS No')
+                if box_col: exp_cols.append(box_col)
+                exp_cols.append('Materials Consumed')
+                
+                with ce_w1:
+                    if FPDF:
+                        pdf_data = generate_worklog_pdf(grouped, id_col, ss_col, box_col)
+                        st.download_button("⬇️ Download PDF", data=pdf_data, file_name="Installation_Logs.pdf", mime="application/pdf")
+                with ce_w2:
+                    excel_data, mime_type, ext = convert_df_to_excel(grouped[exp_cols])
+                    st.download_button(f"⬇️ Download Excel (.{ext})", data=excel_data, file_name=f"Installation_Logs.{ext}", mime=mime_type)
+                    
+                st.markdown("---")
 
                 st.markdown(f"**{len(grouped)} installation tile(s)**")
 
                 wl_delete_map = {}   
 
                 for i, (_, grow) in enumerate(grouped.iterrows()):
-                    date_val = str(grow.get('DateStr', '')).strip()
+                    date_val = str(grow.get('Date', '')).strip()
                     worker   = str(grow.get('Worker',  '')).strip()
                     dtr_code = str(grow.get(id_col,    '')).strip() if id_col else ''
-                    dtr_ss   = str(grow.get(ss_col,    '')).strip() if ss_col else ''
+                    dtr_ss   = str(grow.get('DTR SS No',    '')).strip() if ss_col else ''
                     box_no   = str(grow.get(box_col,   '')).strip() if box_col and box_col in grow.index else ''
                     row_ids  = grow['IDs']
+                    mat_line = grow['Materials Consumed']
 
                     raw_rows = fdf[fdf['ID'].isin(row_ids)]
-                    mat_dict = {}
-                    for _, rr in raw_rows.iterrows():
-                        mat = str(rr['Material']).strip()
-                        try: qty = float(rr['Qty'])
-                        except: qty = 0.0
-                        mat_dict[mat] = mat_dict.get(mat, 0.0) + qty
-
                     raw_first = raw_rows.iloc[0]
                     cap_val   = str(raw_first.get(cap_col, '')).strip() if cap_col else ''
-
-                    mat_line   = format_mat_line(mat_dict)
+                    
+                    mat_dict = {str(rr['Material']).strip(): (float(rr['Qty']) if str(rr['Qty']).replace('.','').isdigit() else 0.0) for _, rr in raw_rows.iterrows()}
                     needs_fix  = tile_needs_lugs_fix(mat_dict)
 
                     del_label = (
@@ -784,7 +811,6 @@ with tabs[2]:
                             ]
                             if box_no: line2.append(f"📦 Box No: {box_no}")
                             st.markdown("  ·  ".join(line2))
-
                             st.caption(mat_line)
 
                             if needs_fix:
@@ -821,11 +847,7 @@ with tabs[2]:
 
                         with col_btn:
                             is_open = st.session_state.get(f'eo_wl_{i}', False)
-                            if st.button(
-                                "✖" if is_open else "✏️",
-                                key=f"eb_wl_{i}",
-                                help="Close" if is_open else "Edit"
-                            ):
+                            if st.button("✖" if is_open else "✏️", key=f"eb_wl_{i}", help="Close" if is_open else "Edit"):
                                 st.session_state[f'eo_wl_{i}'] = not is_open
                                 st.rerun()
 
@@ -873,11 +895,7 @@ with tabs[2]:
                                 cancelled = sc2.form_submit_button("✖ Cancel", use_container_width=True)
 
                             if saved:
-                                meta_update = {
-                                    "Date":   n_date,
-                                    "Worker": n_worker,
-                                    "Synced": "FALSE",
-                                }
+                                meta_update = {"Date": n_date, "Worker": n_worker, "Synced": "FALSE"}
                                 if id_col:  meta_update[id_col]  = n_dtr
                                 if ss_col:  meta_update[ss_col]  = n_ss
                                 if box_col: meta_update[box_col] = n_box
@@ -893,15 +911,11 @@ with tabs[2]:
                                     if rid.startswith("NEW_"):
                                         if new_qty > 0:
                                             new_row = {
-                                                "ID": str(uuid.uuid4()),
-                                                "Date": n_date,
+                                                "ID": str(uuid.uuid4()), "Date": n_date,
                                                 "Site": str(raw_first.get('Site', '')),
-                                                "Worker": n_worker,
-                                                "Material": mat_name,
-                                                "Qty": new_qty,
-                                                "Latitude": str(raw_first.get('Latitude', '')),
-                                                "Longitude": str(raw_first.get('Longitude', '')),
-                                                "Synced": "FALSE"
+                                                "Worker": n_worker, "Material": mat_name,
+                                                "Qty": new_qty, "Latitude": str(raw_first.get('Latitude', '')),
+                                                "Longitude": str(raw_first.get('Longitude', '')), "Synced": "FALSE"
                                             }
                                             if id_col: new_row[id_col] = n_dtr
                                             if ss_col: new_row[ss_col] = n_ss
@@ -929,24 +943,13 @@ with tabs[2]:
 
                 st.markdown("---")
                 st.markdown("### 🗑️ Delete Installation Logs")
-                st.caption(
-                    "Select tiles from the list, then press Delete. "
-                    "A confirmation prompt will appear before anything is removed."
-                )
+                st.caption("Select tiles from the list, then press Delete.")
 
-                del_sel_wl = st.multiselect(
-                    "Tiles to delete", list(wl_delete_map.keys()),
-                    key="del_sel_wl", label_visibility="collapsed",
-                )
+                del_sel_wl = st.multiselect("Tiles to delete", list(wl_delete_map.keys()), key="del_sel_wl", label_visibility="collapsed")
 
                 if del_sel_wl:
-                    flat_ids = [
-                        rid for lbl in del_sel_wl for rid in wl_delete_map[lbl]
-                    ]
-                    if st.button(
-                        f"🗑️ Delete {len(del_sel_wl)} tile(s) ({len(flat_ids)} row(s))",
-                        key="del_btn_wl",
-                    ):
+                    flat_ids = [rid for lbl in del_sel_wl for rid in wl_delete_map[lbl]]
+                    if st.button(f"🗑️ Delete {len(del_sel_wl)} tile(s) ({len(flat_ids)} row(s))", key="del_btn_wl"):
                         st.session_state['confirm_del_wl']  = True
                         st.session_state['del_ids_wl']      = flat_ids
                         st.session_state['del_n_tiles_wl']  = len(del_sel_wl)
@@ -954,17 +957,11 @@ with tabs[2]:
                 if st.session_state.get('confirm_del_wl', False):
                     n_rows  = len(st.session_state.get('del_ids_wl', []))
                     n_tiles = st.session_state.get('del_n_tiles_wl', '?')
-                    st.warning(
-                        f"⚠️ **Permanently delete {n_tiles} installation tile(s) "
-                        f"({n_rows} material row(s) in total)?** \n"
-                        "This action cannot be undone."
-                    )
+                    st.warning(f"⚠️ **Permanently delete {n_tiles} installation tile(s) ({n_rows} material row(s) in total)?** \nThis action cannot be undone.")
                     dc1, dc2 = st.columns(2)
                     with dc1:
-                        if st.button("✅ Yes, Delete", key="conf_del_wl",
-                                     type="primary", use_container_width=True):
-                            if bulk_delete_rows("WorkLogs",
-                                                st.session_state['del_ids_wl']):
+                        if st.button("✅ Yes, Delete", key="conf_del_wl", type="primary", use_container_width=True):
+                            if bulk_delete_rows("WorkLogs", st.session_state['del_ids_wl']):
                                 st.session_state['confirm_del_wl']  = False
                                 st.session_state['del_ids_wl']      = []
                                 st.session_state['del_n_tiles_wl']  = 0
@@ -972,8 +969,7 @@ with tabs[2]:
                                 time.sleep(0.3)
                                 st.rerun()
                     with dc2:
-                        if st.button("❌ Cancel", key="cancel_del_wl",
-                                     use_container_width=True):
+                        if st.button("❌ Cancel", key="cancel_del_wl", use_container_width=True):
                             st.session_state['confirm_del_wl']  = False
                             st.session_state['del_ids_wl']      = []
                             st.session_state['del_n_tiles_wl']  = 0
@@ -1034,7 +1030,7 @@ with tabs[2]:
     # VIEW & MANAGE › INVENTORY LOGS 
     # ─────────────────────────────────────────────────────────────────────────
     with t_inv_view:
-        if st.button("🔄 Refresh Inventory Data", key="ref_inv"):
+        if st.button("🔄 Refresh Data", key="ref_inv"):
             get_data.clear("Inventory")
             st.rerun()
 
@@ -1044,116 +1040,119 @@ with tabs[2]:
                 df_inv['Date'] = pd.to_datetime(df_inv['Date'], errors='coerce')
                 df_inv['OriginalIndex'] = range(len(df_inv))
                 df_inv = df_inv.sort_values(by=['Date', 'OriginalIndex'], ascending=[False, True])
-                df_inv['Date'] = df_inv['Date'].dt.strftime('%Y-%m-%d')
 
-            st.markdown(f"**{len(df_inv)} record(s)**")
+            st.markdown("###### Filters")
+            ic1, ic2 = st.columns(2)
+            avail_mats = ["All"] + sorted(df_inv['Material'].dropna().unique().tolist())
+            inv_mat = ic1.selectbox("Material Type", avail_mats, key="inv_mat_filt")
+            inv_date = ic2.date_input("Date Range", [], key="inv_date_filt")
 
-            inv_delete_map = {}
+            fs_inv = df_inv.copy()
+            if inv_mat != "All":
+                fs_inv = fs_inv[fs_inv['Material'] == inv_mat]
+            if len(inv_date) == 2:
+                mask = (
+                    (fs_inv['Date'].dt.date >= inv_date[0]) &
+                    (fs_inv['Date'].dt.date <= inv_date[1])
+                )
+                fs_inv = fs_inv[mask]
 
-            for i, (_, row) in enumerate(df_inv.iterrows()):
-                date_val = str(row.get('Date',     '')).strip()
-                material = str(row.get('Material', '')).strip()
-                qty      = str(row.get('Qty',      '')).strip()
-                inv_type = str(row.get('Type',     'Inward')).strip()
-                synced   = str(row.get('Synced',   '')).strip().upper()
-                row_id   = str(row['ID'])
+            if not fs_inv.empty:
+                fs_inv['Date'] = fs_inv['Date'].dt.strftime('%Y-%m-%d')
+                
+                # Excel & PDF Export (Inventory Logs)
+                st.write("### 📤 Export Filtered Logs")
+                ce_i1, ce_i2 = st.columns(2)
+                display_cols = [c for c in fs_inv.columns if c not in ["Synced", "RowIndex", "OriginalIndex", "ID"]]
+                
+                with ce_i1:
+                    if FPDF:
+                        pdf_data = generate_inventory_pdf(fs_inv)
+                        st.download_button("⬇️ Download PDF", data=pdf_data, file_name="Inventory_Logs.pdf", mime="application/pdf")
+                with ce_i2:
+                    excel_data, mime_type, ext = convert_df_to_excel(fs_inv[display_cols])
+                    st.download_button(f"⬇️ Download Excel (.{ext})", data=excel_data, file_name=f"Inventory_Logs.{ext}", mime=mime_type)
 
-                inv_delete_map[
-                    f"[{i+1}] {date_val}  ·  "
-                    f"{material or '—'} ({qty or '—'})  ·  {inv_type}"
-                ] = row_id
+                st.markdown("---")
+                st.markdown(f"**{len(fs_inv)} record(s)**")
 
-                with st.container(border=True):
-                    col_c, col_btn = st.columns([7, 1])
+                inv_delete_map = {}
 
-                    with col_c:
-                        type_icon = "⬆️" if inv_type.lower() == "inward" else "⬇️"
-                        st.markdown(f"**📅 {date_val}** ·  {type_icon} {inv_type}")
-                        st.markdown(
-                            f"📦 Material: **{material or '—'}** ·  "
-                            f"🔢 Qty: **{qty or '—'}**"
-                        )
-                        st.caption("✅ Synced" if synced == "TRUE" else "🔄 Pending sync")
+                for i, (_, row) in enumerate(fs_inv.iterrows()):
+                    date_val = str(row.get('Date',     '')).strip()
+                    material = str(row.get('Material', '')).strip()
+                    qty      = str(row.get('Qty',      '')).strip()
+                    inv_type = str(row.get('Type',     'Inward')).strip()
+                    synced   = str(row.get('Synced',   '')).strip().upper()
+                    row_id   = str(row['ID'])
 
-                    with col_btn:
-                        is_open = st.session_state.get(f'eo_inv_{i}', False)
-                        if st.button(
-                            "✖" if is_open else "✏️",
-                            key=f"eb_inv_{i}",
-                            help="Close" if is_open else "Edit"
-                        ):
-                            st.session_state[f'eo_inv_{i}'] = not is_open
-                            st.rerun()
+                    inv_delete_map[f"[{i+1}] {date_val}  ·  {material or '—'} ({qty or '—'})  ·  {inv_type}"] = row_id
 
-                    if st.session_state.get(f'eo_inv_{i}', False):
-                        st.markdown("---")
-                        with st.form(f"ef_inv_{i}"):
-                            st.caption(f"Editing record ID: {row_id}")
-                            n_date = st.text_input("Date", value=date_val)
-                            n_mat  = st.selectbox(
-                                "Material", materials_list,
-                                index=(materials_list.index(material)
-                                       if material in materials_list else 0),
-                            )
-                            n_qty  = st.number_input(
-                                "Qty", value=(float(qty) if qty else 0.0)
-                            )
-                            ic1, ic2  = st.columns(2)
-                            saved     = ic1.form_submit_button("💾 Save",
-                                            type="primary", use_container_width=True)
-                            cancelled = ic2.form_submit_button("✖ Cancel",
-                                            use_container_width=True)
-                        if saved:
-                            u = {"Date": n_date, "Material": n_mat,
-                                 "Qty": n_qty, "Synced": "FALSE"}
-                            if update_row_data("Inventory", row_id, u):
+                    with st.container(border=True):
+                        col_c, col_btn = st.columns([7, 1])
+
+                        with col_c:
+                            type_icon = "⬆️" if inv_type.lower() == "inward" else "⬇️"
+                            st.markdown(f"**📅 {date_val}** ·  {type_icon} {inv_type}")
+                            st.markdown(f"📦 Material: **{material or '—'}** ·  🔢 Qty: **{qty or '—'}**")
+                            st.caption("✅ Synced" if synced == "TRUE" else "🔄 Pending sync")
+
+                        with col_btn:
+                            is_open = st.session_state.get(f'eo_inv_{i}', False)
+                            if st.button("✖" if is_open else "✏️", key=f"eb_inv_{i}", help="Close" if is_open else "Edit"):
+                                st.session_state[f'eo_inv_{i}'] = not is_open
+                                st.rerun()
+
+                        if st.session_state.get(f'eo_inv_{i}', False):
+                            st.markdown("---")
+                            with st.form(f"ef_inv_{i}"):
+                                st.caption(f"Editing record ID: {row_id}")
+                                n_date = st.text_input("Date", value=date_val)
+                                n_mat  = st.selectbox("Material", materials_list, index=(materials_list.index(material) if material in materials_list else 0))
+                                n_qty  = st.number_input("Qty", value=(float(qty) if qty else 0.0))
+                                ic1, ic2  = st.columns(2)
+                                saved     = ic1.form_submit_button("💾 Save", type="primary", use_container_width=True)
+                                cancelled = ic2.form_submit_button("✖ Cancel", use_container_width=True)
+                            if saved:
+                                u = {"Date": n_date, "Material": n_mat, "Qty": n_qty, "Synced": "FALSE"}
+                                if update_row_data("Inventory", row_id, u):
+                                    st.session_state[f'eo_inv_{i}'] = False
+                                    st.success("Saved!")
+                                    time.sleep(0.3)
+                                    st.rerun()
+                            if cancelled:
                                 st.session_state[f'eo_inv_{i}'] = False
-                                st.success("Saved!")
+                                st.rerun()
+
+                st.markdown("---")
+                st.markdown("### 🗑️ Delete Inventory Records")
+                st.caption("Select records, then press Delete. A confirmation prompt will appear.")
+
+                del_sel_inv = st.multiselect("Records to delete", list(inv_delete_map.keys()), key="del_sel_inv", label_visibility="collapsed")
+                if del_sel_inv:
+                    if st.button(f"🗑️ Delete {len(del_sel_inv)} record(s)", key="del_btn_inv"):
+                        st.session_state['confirm_del_inv'] = True
+                        st.session_state['del_ids_inv'] = [inv_delete_map[lbl] for lbl in del_sel_inv]
+
+                if st.session_state.get('confirm_del_inv', False):
+                    n_del = len(st.session_state.get('del_ids_inv', []))
+                    st.warning(f"⚠️ **Permanently delete {n_del} inventory record(s)?** \nThis action cannot be undone.")
+                    dc1, dc2 = st.columns(2)
+                    with dc1:
+                        if st.button("✅ Yes, Delete", key="conf_del_inv", type="primary", use_container_width=True):
+                            if bulk_delete_rows("Inventory", st.session_state['del_ids_inv']):
+                                st.session_state['confirm_del_inv'] = False
+                                st.session_state['del_ids_inv']     = []
+                                st.success("Deleted.")
                                 time.sleep(0.3)
                                 st.rerun()
-                        if cancelled:
-                            st.session_state[f'eo_inv_{i}'] = False
-                            st.rerun()
-
-            st.markdown("---")
-            st.markdown("### 🗑️ Delete Inventory Records")
-            st.caption("Select records, then press Delete. A confirmation prompt will appear.")
-
-            del_sel_inv = st.multiselect(
-                "Records to delete", list(inv_delete_map.keys()),
-                key="del_sel_inv", label_visibility="collapsed",
-            )
-            if del_sel_inv:
-                if st.button(f"🗑️ Delete {len(del_sel_inv)} record(s)",
-                             key="del_btn_inv"):
-                    st.session_state['confirm_del_inv'] = True
-                    st.session_state['del_ids_inv'] = [
-                        inv_delete_map[lbl] for lbl in del_sel_inv
-                    ]
-
-            if st.session_state.get('confirm_del_inv', False):
-                n_del = len(st.session_state.get('del_ids_inv', []))
-                st.warning(
-                    f"⚠️ **Permanently delete {n_del} inventory record(s)?** \n"
-                    "This action cannot be undone."
-                )
-                dc1, dc2 = st.columns(2)
-                with dc1:
-                    if st.button("✅ Yes, Delete", key="conf_del_inv",
-                                 type="primary", use_container_width=True):
-                        if bulk_delete_rows("Inventory",
-                                            st.session_state['del_ids_inv']):
+                    with dc2:
+                        if st.button("❌ Cancel", key="cancel_del_inv", use_container_width=True):
                             st.session_state['confirm_del_inv'] = False
                             st.session_state['del_ids_inv']     = []
-                            st.success("Deleted.")
-                            time.sleep(0.3)
                             st.rerun()
-                with dc2:
-                    if st.button("❌ Cancel", key="cancel_del_inv",
-                                 use_container_width=True):
-                        st.session_state['confirm_del_inv'] = False
-                        st.session_state['del_ids_inv']     = []
-                        st.rerun()
+            else:
+                st.info("No inventory logs match filters.")
         else:
             st.info("No inventory logs available.")
 
