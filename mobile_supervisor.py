@@ -93,12 +93,7 @@ def bulk_delete_rows(worksheet, id_list):
 def update_row_data(worksheet, row_id, updated_data):
     """
     Update specific columns for the row identified by row_id.
-
-    BUG FIX: ws.row_values(1) returns raw cell text which may have leading /
-    trailing whitespace that differs from the stripped column names pandas
-    produces via get_all_records().  We now strip every header before matching
-    so updates to columns like 'SC No/ DTR Code' and 'Transformer_SS_No' are
-    never silently skipped.
+    Strips every header before matching to ensure data saves correctly.
     """
     client = get_connection()
     ws = client.open(SHEET_NAME).worksheet(worksheet)
@@ -106,7 +101,6 @@ def update_row_data(worksheet, row_id, updated_data):
         cell           = ws.find(str(row_id))
         r              = cell.row
         raw_headers    = ws.row_values(1)
-        # Strip each header so matching works regardless of sheet formatting
         headers        = [h.strip() for h in raw_headers]
         updates        = []
         skipped        = []
@@ -214,11 +208,18 @@ def generate_survey_pdf(df_export):
         pdf.ln(5)
     return pdf.output(dest='S').encode('latin-1')
 
+# --- Robust Column Matcher ---
+def resolve_col(columns, candidates):
+    """Intelligently matches sheet headers regardless of underscores or slight variations."""
+    for col in columns:
+        if str(col).strip().lower() in [cand.lower() for cand in candidates]:
+            return col
+    return None
+
 # =============================================================================
 # MATERIAL DISPLAY HELPERS  (used in Installation Logs tiles)
 # =============================================================================
 def _qty_str(qty, unit=""):
-    """Return a clean qty string: int if whole number, float otherwise."""
     try:
         q = float(qty)
         s = str(int(q)) if q == int(q) else str(round(q, 2))
@@ -227,33 +228,20 @@ def _qty_str(qty, unit=""):
     return f"{s}{unit}"
 
 def format_mat_line(mat_dict):
-    """
-    Build the structured material display line for a tile.
-    Order: Box types first → Cable → Lugs → everything else.
-    Example: 📦 DTR Box: 1  ·  🔌 Cable: 20m  ·  🔧 Lugs: 8
-    """
     parts   = []
     handled = set()
-
-    # 1. Box-type materials (anything containing "box" case-insensitively)
     for mat, qty in mat_dict.items():
         if 'box' in mat.lower():
             parts.append(f"📦 {mat}: {_qty_str(qty)}")
             handled.add(mat)
-
-    # 2. Cable
     for mat, qty in mat_dict.items():
         if mat.lower() == 'cable' and mat not in handled:
             parts.append(f"🔌 Cable: {_qty_str(qty, 'm')}")
             handled.add(mat)
-
-    # 3. Lugs
     for mat, qty in mat_dict.items():
         if mat.lower() == 'lugs' and mat not in handled:
             parts.append(f"🔧 Lugs: {_qty_str(qty)}")
             handled.add(mat)
-
-    # 4. Anything else
     for mat, qty in mat_dict.items():
         if mat not in handled:
             parts.append(f"• {mat}: {_qty_str(qty)}")
@@ -261,10 +249,6 @@ def format_mat_line(mat_dict):
     return "  ·  ".join(parts) if parts else "—"
 
 def tile_needs_lugs_fix(mat_dict):
-    """
-    Return True if this installation has cable but is missing lugs entirely
-    (or has lugs qty == 0).  These tiles get the auto-fix button.
-    """
     cable_qty = sum(v for k, v in mat_dict.items() if k.lower() == 'cable')
     lugs_qty  = sum(v for k, v in mat_dict.items() if k.lower() == 'lugs')
     return cable_qty > 0 and lugs_qty == 0
@@ -294,7 +278,7 @@ current_stock = calculate_stock()
 survey_data   = get_data("SurveyLogs")
 
 # =============================================================================
-# TAB 0 — SURVEY ENTRY  (unchanged)
+# TAB 0 — SURVEY ENTRY
 # =============================================================================
 with tabs[0]:
     st.markdown("##### 📍 Site Survey Entry")
@@ -349,11 +333,6 @@ with tabs[0]:
 
 # =============================================================================
 # TAB 1 — LOG WORK
-#
-# CHANGES vs previous version:
-#   • DTR type: DTR Code OR SS No is now MANDATORY (block submit if both blank)
-#   • Non-DTR: Service Number stays required
-#   • Auto-lugs: if cable > 0 and lugs = 0 → auto-set lugs = DEFAULT_LUGS_QTY
 # =============================================================================
 with tabs[1]:
     st.markdown("##### 1. Asset Type")
@@ -397,7 +376,6 @@ with tabs[1]:
             )
             w_capacity = c7.text_input("Transformer Capacity (KVA)")
 
-            # Helpful inline reminder when both ID fields are empty
             if not w_main_id.strip() and not w_ss_no.strip():
                 st.caption(
                     "⚠️ Enter at least **DTR Code** or **DTR SS No** "
@@ -406,7 +384,6 @@ with tabs[1]:
         else:
             c5.write("")
 
-        # Auto-fill GPS from survey database
         surv_lat = surv_lon = ""
         if w_main_id and not survey_data.empty and 'DTR Code' in survey_data.columns:
             match = survey_data[
@@ -436,15 +413,13 @@ with tabs[1]:
             "🚀 Submit Log", type="primary", use_container_width=True
         )
 
-    # ── Validation & save (outside the form so we can show errors cleanly) ──
     if submitted:
-        # ── VALIDATION ────────────────────────────────────────────────────────
         validation_ok = True
 
         if is_dtr:
             if not w_main_id.strip() and not w_ss_no.strip():
                 st.error(
-                    "⚠️ **DTR installation requires at least one identifier.**  \n"
+                    "⚠️ **DTR installation requires at least one identifier.** \n"
                     "Please enter either **DTR Code** or **DTR SS No** (or both) "
                     "before submitting."
                 )
@@ -455,14 +430,12 @@ with tabs[1]:
                 validation_ok = False
 
         if validation_ok:
-            # ── AUTO-LUGS ─────────────────────────────────────────────────────
             effective_lugs = qty_lugs
             lugs_auto_added = False
             if qty_cable > 0 and qty_lugs == 0:
                 effective_lugs  = float(DEFAULT_LUGS_QTY)
                 lugs_auto_added = True
 
-            # ── SAVE ──────────────────────────────────────────────────────────
             batch_rows = []
             meta_data  = [
                 str(w_date), w_main_id, w_dtr_box, w_ss_no,
@@ -471,18 +444,15 @@ with tabs[1]:
             gps_data   = [w_lat, w_long]
             box_item   = f"{w_meter_type} Box"
 
-            # Row 1: Box (always)
             batch_rows.append(
                 [str(uuid.uuid4())] + meta_data +
                 [box_item, 1] + gps_data + ["FALSE"]
             )
-            # Row 2: Cable (if entered)
             if qty_cable > 0:
                 batch_rows.append(
                     [str(uuid.uuid4())] + meta_data +
                     ["Cable", qty_cable] + gps_data + ["FALSE"]
                 )
-            # Row 3: Lugs (if cable entered — either explicit or auto-filled)
             if effective_lugs > 0:
                 batch_rows.append(
                     [str(uuid.uuid4())] + meta_data +
@@ -515,7 +485,7 @@ with tabs[2]:
     ])
 
     # ─────────────────────────────────────────────────────────────────────────
-    # VIEW & MANAGE › SURVEY LOGS  (unchanged)
+    # VIEW & MANAGE › SURVEY LOGS
     # ─────────────────────────────────────────────────────────────────────────
     with t_survey_view:
         if st.button("🔄 Refresh Data", key="ref_surv"):
@@ -577,7 +547,7 @@ with tabs[2]:
                         with col_c:
                             st.markdown(f"**📅 {date_val}**")
                             st.markdown(
-                                f"🔌 DTR Code: **{dtr_code or '—'}**  ·  "
+                                f"🔌 DTR Code: **{dtr_code or '—'}** ·  "
                                 f"📡 DTR SS No: **{dtr_ss or '—'}**"
                             )
                             meta = []
@@ -661,7 +631,7 @@ with tabs[2]:
                 if st.session_state.get('confirm_del_surv', False):
                     n_del = len(st.session_state.get('del_ids_surv', []))
                     st.warning(
-                        f"⚠️ **Permanently delete {n_del} survey record(s)?**  \n"
+                        f"⚠️ **Permanently delete {n_del} survey record(s)?** \n"
                         "This action cannot be undone."
                     )
                     dc1, dc2 = st.columns(2)
@@ -688,21 +658,6 @@ with tabs[2]:
 
     # ─────────────────────────────────────────────────────────────────────────
     # VIEW & MANAGE › INSTALLATION LOGS
-    #
-    # Tile layout:
-    #   Line 1: 📅 Date  ·  👷 Worker
-    #   Line 2: 🔌 DTR Code: X  ·  📡 DTR SS No: Y  [·  📦 Box No: Z]
-    #   Line 3: 📦 DTR Box: 1  ·  🔌 Cable: 20m  ·  🔧 Lugs: 8   ← structured
-    #   Line 4: ⚠️ Lugs missing  [➕ Add 8 Lugs]                  ← if needed
-    #
-    # GROUPING:
-    #   Group by (Date, id_col, Worker, ss_col, box_col).
-    #   With DTR Code OR SS No now mandatory, each installation always has
-    #   at least one non-blank identifier → groupby is reliable.
-    #   Old blank-ID data: grouped best-effort by same key (may merge some).
-    #
-    # ✏️ on tile  → inline edit (shared metadata for all rows in group)
-    # 🗑️ section  → multiselect + confirm dialog at bottom of tab
     # ─────────────────────────────────────────────────────────────────────────
     with t_view_logs:
         df = get_data("WorkLogs")
@@ -742,12 +697,15 @@ with tabs[2]:
                         sel_mat, case=False, na=False)
                 ]
 
-            id_col  = ('SC No/ DTR Code'
-                       if 'SC No/ DTR Code' in fdf.columns else fdf.columns[2])
-            ss_col  = 'Transformer_SS_No' if 'Transformer_SS_No' in fdf.columns else None
-            box_col = 'DTR_Box_No'         if 'DTR_Box_No'         in fdf.columns else None
+            # ── ROBUST COLUMN MATCHING ──
+            id_col  = resolve_col(fdf.columns, ['SC No/ DTR Code', 'DTR Code', 'Service Number'])
+            if not id_col and len(fdf.columns) > 2: id_col = fdf.columns[2]
 
-            if sel_dtr:
+            ss_col  = resolve_col(fdf.columns, ['Transformer_SS_No', 'Transformer SS No', 'DTR SS No', 'SS No'])
+            box_col = resolve_col(fdf.columns, ['DTR_Box_No', 'DTR Box No', 'Box No'])
+            cap_col = resolve_col(fdf.columns, ['Capacity', 'Transformer Capacity (KVA)', 'Transformer Capacity', 'Transformer_Capacity'])
+
+            if sel_dtr and id_col:
                 fdf = fdf[
                     fdf[id_col].astype(str).str.contains(sel_dtr, case=False, na=False)
                 ]
@@ -764,13 +722,15 @@ with tabs[2]:
                 fdf = fdf.copy()
                 fdf['DateStr'] = fdf['Date'].dt.strftime('%Y-%m-%d')
 
-                # Fill NAs in groupby columns
+                # Grouping columns
                 group_cols = ['DateStr', id_col, 'Worker']
                 if ss_col:  group_cols.append(ss_col)
                 if box_col: group_cols.append(box_col)
+                if cap_col: group_cols.append(cap_col)
+
                 fdf[group_cols] = fdf[group_cols].fillna('')
 
-                # Group: collect list of raw row IDs per installation tile
+                # Group
                 grouped = (
                     fdf.groupby(group_cols, sort=False)
                     .agg(IDs=('ID', list))
@@ -779,30 +739,26 @@ with tabs[2]:
 
                 st.markdown(f"**{len(grouped)} installation tile(s)**")
 
-                wl_delete_map = {}   # label → list[row_id]
+                wl_delete_map = {}   
 
                 for i, (_, grow) in enumerate(grouped.iterrows()):
                     date_val = str(grow.get('DateStr', '')).strip()
                     worker   = str(grow.get('Worker',  '')).strip()
-                    dtr_code = str(grow.get(id_col,    '')).strip()
-                    dtr_ss   = (str(grow.get(ss_col,  '')).strip()
-                                if ss_col else '')
-                    box_no   = (str(grow.get(box_col, '')).strip()
-                                if box_col and box_col in grow.index else '')
+                    dtr_code = str(grow.get(id_col,    '')).strip() if id_col else ''
+                    dtr_ss   = str(grow.get(ss_col,    '')).strip() if ss_col else ''
+                    box_no   = str(grow.get(box_col,   '')).strip() if box_col and box_col in grow.index else ''
+                    cap_val  = str(grow.get(cap_col,   '')).strip() if cap_col and cap_col in grow.index else ''
                     row_ids  = grow['IDs']
 
-                    # ── Build mat_dict from the raw rows in this group ────────
+                    # Extract materials for visual
                     raw_rows = fdf[fdf['ID'].isin(row_ids)]
                     mat_dict = {}
                     for _, rr in raw_rows.iterrows():
                         mat = str(rr['Material']).strip()
-                        try:
-                            qty = float(rr['Qty'])
-                        except:
-                            qty = 0.0
+                        try: qty = float(rr['Qty'])
+                        except: qty = 0.0
                         mat_dict[mat] = mat_dict.get(mat, 0.0) + qty
 
-                    # First raw row for metadata used in fix-lugs save
                     raw_first = raw_rows.iloc[0]
 
                     mat_line   = format_mat_line(mat_dict)
@@ -820,39 +776,28 @@ with tabs[2]:
                         col_c, col_btn = st.columns([7, 1])
 
                         with col_c:
-                            # Line 1: Date · Worker
-                            st.markdown(f"**📅 {date_val}**  ·  👷 {worker}")
-
-                            # Line 2: DTR Code · SS No [· Box No] — always labels
+                            st.markdown(f"**📅 {date_val}** ·  👷 {worker}")
                             line2 = [
                                 f"🔌 DTR Code: **{dtr_code or '—'}**",
                                 f"📡 DTR SS No: **{dtr_ss or '—'}**",
                             ]
-                            if box_no:
-                                line2.append(f"📦 Box No: {box_no}")
+                            if box_no: line2.append(f"📦 Box No: {box_no}")
                             st.markdown("  ·  ".join(line2))
 
-                            # Line 3: Structured materials
                             st.caption(mat_line)
 
-                            # Line 4 (conditional): Missing-lugs warning + fix
                             if needs_fix:
                                 lc1, lc2 = st.columns([3, 2])
                                 lc1.warning("⚠️ Lugs missing for this cable entry")
                                 if lc2.button(
                                     f"➕ Add {DEFAULT_LUGS_QTY} Lugs",
                                     key=f"fix_lugs_{i}",
-                                    help="Add default lugs qty to match cable entry",
                                     use_container_width=True,
                                 ):
-                                    # Save new Lugs row using same metadata as this tile
                                     lugs_row = {
                                         "ID":               str(uuid.uuid4()),
                                         "Date":             date_val,
                                         id_col:             dtr_code,
-                                        "DTR_Box_No":       box_no,
-                                        "Transformer_SS_No": dtr_ss,
-                                        "Capacity":         str(raw_first.get('Capacity', '')),
                                         "Site":             str(raw_first.get('Site', '')),
                                         "Worker":           worker,
                                         "Material":         "Lugs",
@@ -861,11 +806,13 @@ with tabs[2]:
                                         "Longitude":        str(raw_first.get('Longitude', '')),
                                         "Synced":           "FALSE",
                                     }
+                                    if box_col: lugs_row[box_col] = box_no
+                                    if ss_col: lugs_row[ss_col] = dtr_ss
+                                    if cap_col: lugs_row[cap_col] = cap_val
+
                                     try:
                                         save_row("WorkLogs", lugs_row)
-                                        st.toast(
-                                            f"✅ Added {DEFAULT_LUGS_QTY} Lugs to this entry."
-                                        )
+                                        st.toast(f"✅ Added {DEFAULT_LUGS_QTY} Lugs to this entry.")
                                         time.sleep(0.8)
                                         st.rerun()
                                     except Exception as e:
@@ -885,67 +832,42 @@ with tabs[2]:
                         if st.session_state.get(f'eo_wl_{i}', False):
                             st.markdown("---")
 
-                            # mat_to_row: material_name → {row_id, qty}
-                            # Built from the same raw_rows used for mat_dict.
-                            # Each material gets its own editable qty field that
-                            # updates only that specific sheet row on save.
                             mat_to_row = {}
                             for _, rr in raw_rows.iterrows():
                                 mat = str(rr['Material']).strip()
-                                try:
-                                    qty_r = float(rr['Qty'])
-                                except:
-                                    qty_r = 0.0
-                                # If same material appears twice, keep last
-                                mat_to_row[mat] = {
-                                    'row_id': str(rr['ID']),
-                                    'qty':    qty_r,
-                                }
+                                try: qty_r = float(rr['Qty'])
+                                except: qty_r = 0.0
+                                mat_to_row[mat] = {'row_id': str(rr['ID']), 'qty': qty_r}
 
                             with st.form(f"ef_wl_{i}"):
-                                st.caption(
-                                    f"Editing {len(row_ids)} material row(s) "
-                                    "in this installation"
-                                )
+                                st.caption(f"Editing {len(row_ids)} material row(s)")
 
-                                # ── Shared metadata fields ────────────────────
                                 st.markdown("###### Installation Details")
-                                n_date   = st.text_input("Date",       value=date_val)
-                                mc1, mc2 = st.columns(2)
+                                n_date   = st.text_input("Date", value=date_val)
+                                
+                                mc1, mc2, mc3 = st.columns(3)
                                 n_dtr    = mc1.text_input("DTR Code",   value=dtr_code)
                                 n_ss     = mc2.text_input("DTR SS No",  value=dtr_ss)
-                                mc3, mc4 = st.columns(2)
                                 n_box    = mc3.text_input("DTR Box No", value=box_no)
-                                w_idx    = (workers.index(worker)
-                                            if worker in workers else 0)
-                                n_worker = mc4.selectbox("Worker", workers, index=w_idx)
 
-                                # ── Per-material qty fields ───────────────────
+                                mc4, mc5 = st.columns(2)
+                                n_cap    = mc4.text_input("Capacity", value=cap_val)
+                                w_idx    = (workers.index(worker) if worker in workers else 0)
+                                n_worker = mc5.selectbox("Worker", workers, index=w_idx)
+
                                 st.markdown("###### Materials")
                                 mat_qty_inputs = {}
                                 for mat_name, mat_info in mat_to_row.items():
-                                    label = (
-                                        f"{mat_name} (Mtrs)"
-                                        if mat_name.lower() == 'cable'
-                                        else f"{mat_name} (Qty)"
-                                    )
+                                    label = f"{mat_name} (Mtrs)" if mat_name.lower() == 'cable' else f"{mat_name} (Qty)"
                                     mat_qty_inputs[mat_name] = st.number_input(
-                                        label,
-                                        value=mat_info['qty'],
-                                        min_value=0.0,
-                                        step=1.0,
-                                        key=f"mat_qty_{i}_{mat_name}",
+                                        label, value=mat_info['qty'], min_value=0.0, step=1.0, key=f"mat_qty_{i}_{mat_name}"
                                     )
 
                                 sc1, sc2 = st.columns(2)
-                                saved    = sc1.form_submit_button(
-                                    "💾 Save", type="primary",
-                                    use_container_width=True)
-                                cancelled = sc2.form_submit_button(
-                                    "✖ Cancel", use_container_width=True)
+                                saved    = sc1.form_submit_button("💾 Save", type="primary", use_container_width=True)
+                                cancelled = sc2.form_submit_button("✖ Cancel", use_container_width=True)
 
                             if saved:
-                                # Step 1: push shared metadata to ALL rows
                                 meta_update = {
                                     "Date":   n_date,
                                     id_col:   n_dtr,
@@ -954,19 +876,12 @@ with tabs[2]:
                                 }
                                 if ss_col:  meta_update[ss_col]  = n_ss
                                 if box_col: meta_update[box_col] = n_box
+                                if cap_col: meta_update[cap_col] = n_cap
 
-                                meta_ok = all(
-                                    update_row_data("WorkLogs", rid, meta_update)
-                                    for rid in row_ids
-                                )
-
-                                # Step 2: push Qty to each material's own row
+                                meta_ok = all(update_row_data("WorkLogs", rid, meta_update) for rid in row_ids)
                                 qty_ok = True
                                 for mat_name, new_qty in mat_qty_inputs.items():
-                                    mat_row_id = mat_to_row[mat_name]['row_id']
-                                    if not update_row_data(
-                                        "WorkLogs", mat_row_id, {"Qty": new_qty}
-                                    ):
+                                    if not update_row_data("WorkLogs", mat_to_row[mat_name]['row_id'], {"Qty": new_qty}):
                                         qty_ok = False
 
                                 if meta_ok and qty_ok:
@@ -975,10 +890,7 @@ with tabs[2]:
                                     time.sleep(0.8)
                                     st.rerun()
                                 else:
-                                    st.error(
-                                        "Some fields may not have saved. "
-                                        "Check the warnings above."
-                                    )
+                                    st.error("Some fields may not have saved. Check the warnings above.")
 
                             if cancelled:
                                 st.session_state[f'eo_wl_{i}'] = False
@@ -1014,7 +926,7 @@ with tabs[2]:
                     n_tiles = st.session_state.get('del_n_tiles_wl', '?')
                     st.warning(
                         f"⚠️ **Permanently delete {n_tiles} installation tile(s) "
-                        f"({n_rows} material row(s) in total)?**  \n"
+                        f"({n_rows} material row(s) in total)?** \n"
                         "This action cannot be undone."
                     )
                     dc1, dc2 = st.columns(2)
@@ -1043,7 +955,7 @@ with tabs[2]:
             st.info("No work logs available.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # VIEW & MANAGE › GPS DATA  (unchanged)
+    # VIEW & MANAGE › GPS DATA 
     # ─────────────────────────────────────────────────────────────────────────
     with t_gps:
         st.caption("View and export captured location data.")
@@ -1053,9 +965,9 @@ with tabs[2]:
                 df_gps['Latitude'].astype(str).str.strip() != ''
             ].copy()
             if not gps_valid.empty:
-                id_col_g   = ('SC No/ DTR Code'
-                              if 'SC No/ DTR Code' in gps_valid.columns
-                              else gps_valid.columns[2])
+                id_col_g = resolve_col(gps_valid.columns, ['SC No/ DTR Code', 'DTR Code', 'Service Number'])
+                if not id_col_g: id_col_g = gps_valid.columns[2]
+
                 gps_unique = gps_valid.drop_duplicates(subset=[id_col_g])
                 st.dataframe(
                     gps_unique[[id_col_g, 'Site', 'Latitude', 'Longitude']],
@@ -1084,7 +996,7 @@ with tabs[2]:
             st.warning("GPS columns not found in Sheet. Please update header row.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # VIEW & MANAGE › INVENTORY LOGS  (unchanged)
+    # VIEW & MANAGE › INVENTORY LOGS 
     # ─────────────────────────────────────────────────────────────────────────
     with t_inv_view:
         df_inv = get_data("Inventory")
@@ -1111,9 +1023,9 @@ with tabs[2]:
 
                     with col_c:
                         type_icon = "⬆️" if inv_type.lower() == "inward" else "⬇️"
-                        st.markdown(f"**📅 {date_val}**  ·  {type_icon} {inv_type}")
+                        st.markdown(f"**📅 {date_val}** ·  {type_icon} {inv_type}")
                         st.markdown(
-                            f"📦 Material: **{material or '—'}**  ·  "
+                            f"📦 Material: **{material or '—'}** ·  "
                             f"🔢 Qty: **{qty or '—'}**"
                         )
                         st.caption("✅ Synced" if synced == "TRUE" else "🔄 Pending sync")
@@ -1177,7 +1089,7 @@ with tabs[2]:
             if st.session_state.get('confirm_del_inv', False):
                 n_del = len(st.session_state.get('del_ids_inv', []))
                 st.warning(
-                    f"⚠️ **Permanently delete {n_del} inventory record(s)?**  \n"
+                    f"⚠️ **Permanently delete {n_del} inventory record(s)?** \n"
                     "This action cannot be undone."
                 )
                 dc1, dc2 = st.columns(2)
@@ -1201,7 +1113,7 @@ with tabs[2]:
             st.info("No inventory logs available.")
 
 # =============================================================================
-# TAB 3 — INVENTORY (Add Stock)  (unchanged)
+# TAB 3 — INVENTORY (Add Stock)
 # =============================================================================
 with tabs[3]:
     st.subheader("📊 Stock Overview")
@@ -1239,7 +1151,7 @@ with tabs[3]:
             st.rerun()
 
 # =============================================================================
-# TAB 4 — WORKERS  (unchanged)
+# TAB 4 — WORKERS
 # =============================================================================
 with tabs[4]:
     st.subheader("👥 Workers")
