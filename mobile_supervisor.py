@@ -174,20 +174,36 @@ def calculate_stock():
 
 # --- EXPORT HELPERS ---
 def clean_text(text):
-    """Sanitizes text to prevent FPDF UnicodeEncodeError by safely removing non-Latin-1 characters (e.g., Emojis)."""
+    """Sanitizes text to prevent FPDF UnicodeEncodeError by safely removing non-Latin-1 characters."""
     if pd.isna(text) or text is None:
         return ""
     return str(text).encode('latin-1', 'ignore').decode('latin-1')
 
-def convert_df_to_excel(df):
+def convert_df_to_excel(df, summary_dict=None):
     output = io.BytesIO()
     try:
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Exported Data')
+            start_row = len(summary_dict) + 1 if summary_dict else 0
+            df.to_excel(writer, index=False, sheet_name='Exported Data', startrow=start_row)
+            
+            if summary_dict:
+                worksheet = writer.sheets['Exported Data']
+                row_idx = 0
+                for k, v in summary_dict.items():
+                    worksheet.write(row_idx, 0, f"{k}: {v}")
+                    row_idx += 1
+                    
         return output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"
     except ImportError:
         # Fallback to CSV if xlsxwriter is missing
-        return df.to_csv(index=False).encode('utf-8'), "text/csv", "csv"
+        csv_str = ""
+        if summary_dict:
+            for k, v in summary_dict.items():
+                safe_v = str(v).replace(',', ';')
+                csv_str += f"{k},{safe_v}\n"
+            csv_str += "\n"
+        csv_str += df.to_csv(index=False)
+        return csv_str.encode('utf-8'), "text/csv", "csv"
 
 def generate_survey_pdf(df_export):
     if FPDF is None: return None
@@ -215,13 +231,24 @@ def generate_survey_pdf(df_export):
         pdf.ln(5)
     return pdf.output(dest='S').encode('latin-1')
 
-def generate_worklog_pdf(df_export, id_col, ss_col, box_col):
+def generate_worklog_pdf(df_export, id_col, ss_col, box_col, summary_dict=None):
     if FPDF is None: return None
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(200, 10, txt="Installation Logs Export", ln=True, align='C')
     pdf.ln(5)
+    
+    if summary_dict:
+        pdf.set_font("Arial", 'B', 11)
+        pdf.cell(200, 8, txt="Summary Report:", ln=True)
+        pdf.set_font("Arial", '', 10)
+        for k, v in summary_dict.items():
+            pdf.cell(200, 6, txt=clean_text(f"{k}: {v}"), ln=True)
+        pdf.ln(5)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(5)
+
     for _, row in df_export.iterrows():
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(200, 8, txt=clean_text(f"Date: {row['Date']} | Worker: {row['Worker']}"), ln=True)
@@ -751,7 +778,7 @@ with tabs[2]:
                     .reset_index()
                 )
                 
-                # Fetch formatted string for export & UI
+                # Fetch formatted string for UI
                 grouped['Materials Consumed'] = grouped['IDs'].apply(lambda ids: format_mat_line({
                     str(rr['Material']).strip(): float(rr['Qty']) if str(rr['Qty']).replace('.','').isdigit() else 0.0
                     for _, rr in fdf[fdf['ID'].isin(ids)].iterrows()
@@ -759,6 +786,37 @@ with tabs[2]:
                 
                 grouped.rename(columns={'DateStr': 'Date'}, inplace=True)
                 if ss_col: grouped.rename(columns={ss_col: 'DTR SS No'}, inplace=True)
+                
+                # =============================================================
+                # CALCULATE INSTALLATION SUMMARY METRICS
+                # =============================================================
+                total_installs = len(grouped)
+                worker_counts = grouped['Worker'].value_counts()
+                worker_summary_str = ", ".join([f"{w}: {c}" for w, c in worker_counts.items()])
+                
+                def safe_sum_qty(mat_name):
+                    subset = fdf[fdf['Material'].astype(str).str.strip().str.lower() == mat_name.lower()]
+                    return pd.to_numeric(subset['Qty'], errors='coerce').fillna(0).sum()
+                    
+                total_cable = safe_sum_qty('cable')
+                total_lugs  = safe_sum_qty('lugs')
+                
+                summary_dict = {
+                    "Total Installations": total_installs,
+                    "Installations by Worker": worker_summary_str if worker_summary_str else "N/A",
+                    "Total Cable Used": f"{total_cable:g} m",
+                    "Total Lugs Used": f"{total_lugs:g}"
+                }
+                
+                st.markdown("---")
+                st.markdown("### 📊 Filtered Summary")
+                sum_c1, sum_c2, sum_c3 = st.columns(3)
+                sum_c1.metric("Total Installations", total_installs)
+                sum_c2.metric("Total Cable (m)", f"{total_cable:g}")
+                sum_c3.metric("Total Lugs", f"{total_lugs:g}")
+                if worker_summary_str:
+                    st.caption(f"**By Worker:** {worker_summary_str}")
+                st.markdown("---")
 
                 # Excel & PDF Export (Installation Logs)
                 st.write("### 📤 Export Filtered Logs")
@@ -772,14 +830,13 @@ with tabs[2]:
                 
                 with ce_w1:
                     if FPDF:
-                        pdf_data = generate_worklog_pdf(grouped, id_col, ss_col, box_col)
+                        pdf_data = generate_worklog_pdf(grouped, id_col, ss_col, box_col, summary_dict)
                         st.download_button("⬇️ Download PDF", data=pdf_data, file_name="Installation_Logs.pdf", mime="application/pdf")
                 with ce_w2:
-                    excel_data, mime_type, ext = convert_df_to_excel(grouped[exp_cols])
+                    excel_data, mime_type, ext = convert_df_to_excel(grouped[exp_cols], summary_dict)
                     st.download_button(f"⬇️ Download Excel (.{ext})", data=excel_data, file_name=f"Installation_Logs.{ext}", mime=mime_type)
                     
                 st.markdown("---")
-
                 st.markdown(f"**{len(grouped)} installation tile(s)**")
 
                 wl_delete_map = {}   
