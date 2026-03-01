@@ -4,3 +4,4 @@ gspread
 oauth2client
 streamlit_js_eval
 fpdf
+xlsxwriter
