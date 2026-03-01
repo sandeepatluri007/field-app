@@ -495,6 +495,9 @@ with tabs[2]:
         if not survey_data.empty:
             if 'Date' in survey_data.columns:
                 survey_data['Date'] = pd.to_datetime(survey_data['Date'], errors='coerce')
+                # --- SORTING LOGIC: Newest date first ---
+                survey_data['RowIndex'] = range(len(survey_data))
+                survey_data = survey_data.sort_values(by=['Date', 'RowIndex'], ascending=[False, True])
 
             st.markdown("###### Filters")
             cf1, cf2, cf3 = st.columns(3)
@@ -662,8 +665,33 @@ with tabs[2]:
     with t_view_logs:
         df = get_data("WorkLogs")
         if not df.empty:
-            if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+
+            # ── ROBUST COLUMN MATCHING ──
+            id_col  = resolve_col(df.columns, ['SC No/ DTR Code', 'DTR Code', 'Service Number'])
+            if not id_col and len(df.columns) > 2: id_col = df.columns[2]
+
+            ss_col  = resolve_col(df.columns, ['Transformer_SS_No', 'Transformer SS No', 'DTR SS No', 'SS No'])
+            box_col = resolve_col(df.columns, ['DTR_Box_No', 'DTR Box No', 'Box No'])
+            cap_col = resolve_col(df.columns, ['Capacity', 'Transformer Capacity (KVA)', 'Transformer Capacity', 'Transformer_Capacity'])
+
+            # ── TILE GROUPING & CHRONOLOGICAL SORTING LOGIC ──
+            df['DateStr'] = df['Date'].dt.strftime('%Y-%m-%d')
+            meta_cols = ['DateStr', 'Site', 'Worker']
+            if id_col: meta_cols.append(id_col)
+            if ss_col: meta_cols.append(ss_col)
+            if box_col: meta_cols.append(box_col)
+
+            df[meta_cols] = df[meta_cols].fillna('')
+            metadata_changed = (df[meta_cols] != df[meta_cols].shift()).any(axis=1)
+            is_box = df['Material'].astype(str).str.contains('Box', case=False, na=False)
+
+            # This calculation mathematically groups Box/Cable/Lugs together exactly how they were inserted
+            df['_sub_grp'] = (metadata_changed | is_box).cumsum()
+            
+            # Now apply chronological sorting: Newest Date -> Newest SubGroup -> Original Index Order (Box -> Cable -> Lugs)
+            df['OriginalIndex'] = range(len(df))
+            df = df.sort_values(by=['Date', '_sub_grp', 'OriginalIndex'], ascending=[False, False, True])
 
             st.markdown("###### Filters")
             c_f1, c_f2, c_f3, c_f4 = st.columns(4)
@@ -697,14 +725,6 @@ with tabs[2]:
                         sel_mat, case=False, na=False)
                 ]
 
-            # ── ROBUST COLUMN MATCHING ──
-            id_col  = resolve_col(fdf.columns, ['SC No/ DTR Code', 'DTR Code', 'Service Number'])
-            if not id_col and len(fdf.columns) > 2: id_col = fdf.columns[2]
-
-            ss_col  = resolve_col(fdf.columns, ['Transformer_SS_No', 'Transformer SS No', 'DTR SS No', 'SS No'])
-            box_col = resolve_col(fdf.columns, ['DTR_Box_No', 'DTR Box No', 'Box No'])
-            cap_col = resolve_col(fdf.columns, ['Capacity', 'Transformer Capacity (KVA)', 'Transformer Capacity', 'Transformer_Capacity'])
-
             if sel_dtr and id_col:
                 fdf = fdf[
                     fdf[id_col].astype(str).str.contains(sel_dtr, case=False, na=False)
@@ -719,20 +739,15 @@ with tabs[2]:
                 ]
 
             if not fdf.empty:
-                fdf = fdf.copy()
-                fdf['DateStr'] = fdf['Date'].dt.strftime('%Y-%m-%d')
-
                 # Grouping columns
-                group_cols = ['DateStr', id_col, 'Worker']
-                if ss_col:  group_cols.append(ss_col)
-                if box_col: group_cols.append(box_col)
-                if cap_col: group_cols.append(cap_col)
-
-                fdf[group_cols] = fdf[group_cols].fillna('')
+                group_cols_to_agg = ['_sub_grp', 'DateStr', 'Worker']
+                if id_col: group_cols_to_agg.append(id_col)
+                if ss_col: group_cols_to_agg.append(ss_col)
+                if box_col: group_cols_to_agg.append(box_col)
 
                 # Group
                 grouped = (
-                    fdf.groupby(group_cols, sort=False)
+                    fdf.groupby(group_cols_to_agg, sort=False)
                     .agg(IDs=('ID', list))
                     .reset_index()
                 )
@@ -747,7 +762,6 @@ with tabs[2]:
                     dtr_code = str(grow.get(id_col,    '')).strip() if id_col else ''
                     dtr_ss   = str(grow.get(ss_col,    '')).strip() if ss_col else ''
                     box_no   = str(grow.get(box_col,   '')).strip() if box_col and box_col in grow.index else ''
-                    cap_val  = str(grow.get(cap_col,   '')).strip() if cap_col and cap_col in grow.index else ''
                     row_ids  = grow['IDs']
 
                     # Extract materials for visual
@@ -760,6 +774,7 @@ with tabs[2]:
                         mat_dict[mat] = mat_dict.get(mat, 0.0) + qty
 
                     raw_first = raw_rows.iloc[0]
+                    cap_val   = str(raw_first.get(cap_col, '')).strip() if cap_col else ''
 
                     mat_line   = format_mat_line(mat_dict)
                     needs_fix  = tile_needs_lugs_fix(mat_dict)
@@ -797,7 +812,6 @@ with tabs[2]:
                                     lugs_row = {
                                         "ID":               str(uuid.uuid4()),
                                         "Date":             date_val,
-                                        id_col:             dtr_code,
                                         "Site":             str(raw_first.get('Site', '')),
                                         "Worker":           worker,
                                         "Material":         "Lugs",
@@ -806,6 +820,7 @@ with tabs[2]:
                                         "Longitude":        str(raw_first.get('Longitude', '')),
                                         "Synced":           "FALSE",
                                     }
+                                    if id_col: lugs_row[id_col] = dtr_code
                                     if box_col: lugs_row[box_col] = box_no
                                     if ss_col: lugs_row[ss_col] = dtr_ss
                                     if cap_col: lugs_row[cap_col] = cap_val
@@ -870,10 +885,10 @@ with tabs[2]:
                             if saved:
                                 meta_update = {
                                     "Date":   n_date,
-                                    id_col:   n_dtr,
                                     "Worker": n_worker,
                                     "Synced": "FALSE",
                                 }
+                                if id_col:  meta_update[id_col]  = n_dtr
                                 if ss_col:  meta_update[ss_col]  = n_ss
                                 if box_col: meta_update[box_col] = n_box
                                 if cap_col: meta_update[cap_col] = n_cap
@@ -961,6 +976,12 @@ with tabs[2]:
         st.caption("View and export captured location data.")
         df_gps = get_data("WorkLogs")
         if not df_gps.empty and 'Latitude' in df_gps.columns:
+            # --- SORTING LOGIC: Newest date first ---
+            if 'Date' in df_gps.columns:
+                df_gps['Date'] = pd.to_datetime(df_gps['Date'], errors='coerce')
+                df_gps['OriginalIndex'] = range(len(df_gps))
+                df_gps = df_gps.sort_values(by=['Date', 'OriginalIndex'], ascending=[False, True])
+
             gps_valid = df_gps[
                 df_gps['Latitude'].astype(str).str.strip() != ''
             ].copy()
@@ -1001,6 +1022,13 @@ with tabs[2]:
     with t_inv_view:
         df_inv = get_data("Inventory")
         if not df_inv.empty:
+            # --- SORTING LOGIC: Newest date first ---
+            if 'Date' in df_inv.columns:
+                df_inv['Date'] = pd.to_datetime(df_inv['Date'], errors='coerce')
+                df_inv['OriginalIndex'] = range(len(df_inv))
+                df_inv = df_inv.sort_values(by=['Date', 'OriginalIndex'], ascending=[False, True])
+                df_inv['Date'] = df_inv['Date'].dt.strftime('%Y-%m-%d')
+
             st.markdown(f"**{len(df_inv)} record(s)**")
 
             inv_delete_map = {}
