@@ -91,25 +91,52 @@ def bulk_delete_rows(worksheet, id_list):
         return False
 
 def update_row_data(worksheet, row_id, updated_data):
+    """
+    Update specific columns for the row identified by row_id.
+
+    BUG FIX: ws.row_values(1) returns raw cell text which may have leading /
+    trailing whitespace that differs from the stripped column names pandas
+    produces via get_all_records().  We now strip every header before matching
+    so updates to columns like 'SC No/ DTR Code' and 'Transformer_SS_No' are
+    never silently skipped.
+    """
     client = get_connection()
     ws = client.open(SHEET_NAME).worksheet(worksheet)
     try:
-        cell    = ws.find(str(row_id))
-        r       = cell.row
-        headers = ws.row_values(1)
-        updates = []
+        cell           = ws.find(str(row_id))
+        r              = cell.row
+        raw_headers    = ws.row_values(1)
+        # Strip each header so matching works regardless of sheet formatting
+        headers        = [h.strip() for h in raw_headers]
+        updates        = []
+        skipped        = []
+
         for col_name, value in updated_data.items():
-            if col_name in headers:
-                col_idx = headers.index(col_name) + 1
+            col_name_s = col_name.strip()
+            if col_name_s in headers:
+                col_idx = headers.index(col_name_s) + 1
                 updates.append({
                     'range':  gspread.utils.rowcol_to_a1(r, col_idx),
                     'values': [[value]]
                 })
+            else:
+                skipped.append(col_name_s)
+
+        if skipped:
+            st.warning(
+                f"⚠️ Column(s) not found in sheet and were skipped: "
+                f"{', '.join(skipped)}.  "
+                f"Check that your sheet header row matches exactly."
+            )
+
         if updates:
             ws.batch_update(updates)
             clear_cache()
             return True
+
+        st.error("Update failed: none of the target columns were found in the sheet.")
         return False
+
     except Exception as e:
         st.error(f"Update Error: {e}")
         return False
@@ -857,18 +884,59 @@ with tabs[2]:
                         # ── Inline edit ───────────────────────────────────────
                         if st.session_state.get(f'eo_wl_{i}', False):
                             st.markdown("---")
+
+                            # mat_to_row: material_name → {row_id, qty}
+                            # Built from the same raw_rows used for mat_dict.
+                            # Each material gets its own editable qty field that
+                            # updates only that specific sheet row on save.
+                            mat_to_row = {}
+                            for _, rr in raw_rows.iterrows():
+                                mat = str(rr['Material']).strip()
+                                try:
+                                    qty_r = float(rr['Qty'])
+                                except:
+                                    qty_r = 0.0
+                                # If same material appears twice, keep last
+                                mat_to_row[mat] = {
+                                    'row_id': str(rr['ID']),
+                                    'qty':    qty_r,
+                                }
+
                             with st.form(f"ef_wl_{i}"):
                                 st.caption(
                                     f"Editing {len(row_ids)} material row(s) "
                                     "in this installation"
                                 )
+
+                                # ── Shared metadata fields ────────────────────
+                                st.markdown("###### Installation Details")
                                 n_date   = st.text_input("Date",       value=date_val)
-                                n_dtr    = st.text_input("DTR Code",   value=dtr_code)
-                                n_ss     = st.text_input("DTR SS No",  value=dtr_ss)
-                                n_box    = st.text_input("DTR Box No", value=box_no)
+                                mc1, mc2 = st.columns(2)
+                                n_dtr    = mc1.text_input("DTR Code",   value=dtr_code)
+                                n_ss     = mc2.text_input("DTR SS No",  value=dtr_ss)
+                                mc3, mc4 = st.columns(2)
+                                n_box    = mc3.text_input("DTR Box No", value=box_no)
                                 w_idx    = (workers.index(worker)
                                             if worker in workers else 0)
-                                n_worker = st.selectbox("Worker", workers, index=w_idx)
+                                n_worker = mc4.selectbox("Worker", workers, index=w_idx)
+
+                                # ── Per-material qty fields ───────────────────
+                                st.markdown("###### Materials")
+                                mat_qty_inputs = {}
+                                for mat_name, mat_info in mat_to_row.items():
+                                    label = (
+                                        f"{mat_name} (Mtrs)"
+                                        if mat_name.lower() == 'cable'
+                                        else f"{mat_name} (Qty)"
+                                    )
+                                    mat_qty_inputs[mat_name] = st.number_input(
+                                        label,
+                                        value=mat_info['qty'],
+                                        min_value=0.0,
+                                        step=1.0,
+                                        key=f"mat_qty_{i}_{mat_name}",
+                                    )
+
                                 sc1, sc2 = st.columns(2)
                                 saved    = sc1.form_submit_button(
                                     "💾 Save", type="primary",
@@ -877,23 +945,41 @@ with tabs[2]:
                                     "✖ Cancel", use_container_width=True)
 
                             if saved:
-                                u = {
+                                # Step 1: push shared metadata to ALL rows
+                                meta_update = {
                                     "Date":   n_date,
                                     id_col:   n_dtr,
                                     "Worker": n_worker,
                                     "Synced": "FALSE",
                                 }
-                                if ss_col:  u[ss_col]  = n_ss
-                                if box_col: u[box_col] = n_box
-                                ok = all(
-                                    update_row_data("WorkLogs", rid, u)
+                                if ss_col:  meta_update[ss_col]  = n_ss
+                                if box_col: meta_update[box_col] = n_box
+
+                                meta_ok = all(
+                                    update_row_data("WorkLogs", rid, meta_update)
                                     for rid in row_ids
                                 )
-                                if ok:
+
+                                # Step 2: push Qty to each material's own row
+                                qty_ok = True
+                                for mat_name, new_qty in mat_qty_inputs.items():
+                                    mat_row_id = mat_to_row[mat_name]['row_id']
+                                    if not update_row_data(
+                                        "WorkLogs", mat_row_id, {"Qty": new_qty}
+                                    ):
+                                        qty_ok = False
+
+                                if meta_ok and qty_ok:
                                     st.session_state[f'eo_wl_{i}'] = False
                                     st.success("Saved!")
                                     time.sleep(0.8)
                                     st.rerun()
+                                else:
+                                    st.error(
+                                        "Some fields may not have saved. "
+                                        "Check the warnings above."
+                                    )
+
                             if cancelled:
                                 st.session_state[f'eo_wl_{i}'] = False
                                 st.rerun()
