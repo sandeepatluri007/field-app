@@ -173,6 +173,12 @@ def calculate_stock():
     return stock
 
 # --- EXPORT HELPERS ---
+def clean_text(text):
+    """Sanitizes text to prevent FPDF UnicodeEncodeError by safely removing non-Latin-1 characters (e.g., Emojis)."""
+    if pd.isna(text) or text is None:
+        return ""
+    return str(text).encode('latin-1', 'ignore').decode('latin-1')
+
 def convert_df_to_excel(df):
     output = io.BytesIO()
     try:
@@ -191,20 +197,21 @@ def generate_survey_pdf(df_export):
     pdf.cell(200, 10, txt="Survey Logs Export", ln=True, align='C')
     pdf.ln(5)
     for _, row in df_export.iterrows():
-        dtr_name = str(row.get('DTR Name', 'N/A'))
-        dtr_code = str(row.get('DTR Code', 'N/A'))
-        lat      = str(row.get('Latitude',  ''))
-        lon      = str(row.get('Longitude', ''))
-        date_val = str(row.get('Date', ''))
-        lc_val   = str(row.get('LC/AB Switch', 'None'))
-        lm_val   = str(row.get('Lineman Name', 'N/A'))
+        dtr_name = row.get('DTR Name', 'N/A')
+        dtr_code = row.get('DTR Code', 'N/A')
+        lat      = row.get('Latitude',  '')
+        lon      = row.get('Longitude', '')
+        date_val = row.get('Date', '')
+        lc_val   = row.get('LC/AB Switch', 'None')
+        lm_val   = row.get('Lineman Name', 'N/A')
         loc_link = (f"https://maps.google.com/?q={lat},{lon}"
                     if lat and lon else "No Location Provided")
+        
         pdf.set_font("Arial", 'B', 10)
-        pdf.cell(200, 8, txt=f"DTR SS No: {dtr_name} (Code: {dtr_code}) | Date: {date_val}", ln=True)
+        pdf.cell(200, 8, txt=clean_text(f"DTR SS No: {dtr_name} (Code: {dtr_code}) | Date: {date_val}"), ln=True)
         pdf.set_font("Arial", '', 10)
-        pdf.cell(200, 8, txt=f"Switch: {lc_val} | Lineman: {lm_val}", ln=True)
-        pdf.cell(200, 8, txt=f"Location: {loc_link}", ln=True)
+        pdf.cell(200, 8, txt=clean_text(f"Switch: {lc_val} | Lineman: {lm_val}"), ln=True)
+        pdf.cell(200, 8, txt=clean_text(f"Location: {loc_link}"), ln=True)
         pdf.ln(5)
     return pdf.output(dest='S').encode('latin-1')
 
@@ -217,7 +224,7 @@ def generate_worklog_pdf(df_export, id_col, ss_col, box_col):
     pdf.ln(5)
     for _, row in df_export.iterrows():
         pdf.set_font("Arial", 'B', 10)
-        pdf.cell(200, 8, txt=f"Date: {row['Date']} | Worker: {row['Worker']}", ln=True)
+        pdf.cell(200, 8, txt=clean_text(f"Date: {row['Date']} | Worker: {row['Worker']}"), ln=True)
         pdf.set_font("Arial", '', 10)
         
         info_line = []
@@ -225,8 +232,8 @@ def generate_worklog_pdf(df_export, id_col, ss_col, box_col):
         if ss_col and row.get('DTR SS No'): info_line.append(f"SS No: {row['DTR SS No']}")
         if box_col and row.get(box_col): info_line.append(f"Box: {row[box_col]}")
         
-        pdf.cell(200, 8, txt=" | ".join(info_line), ln=True)
-        pdf.cell(200, 8, txt=f"Materials: {row['Materials Consumed']}", ln=True)
+        pdf.cell(200, 8, txt=clean_text(" | ".join(info_line)), ln=True)
+        pdf.cell(200, 8, txt=clean_text(f"Materials: {row['Materials Consumed']}"), ln=True)
         pdf.ln(5)
     return pdf.output(dest='S').encode('latin-1')
 
@@ -240,9 +247,9 @@ def generate_inventory_pdf(df_export):
     for _, row in df_export.iterrows():
         pdf.set_font("Arial", 'B', 10)
         type_str = row.get('Type', 'Inward')
-        pdf.cell(200, 8, txt=f"Date: {row['Date']} | Type: {type_str}", ln=True)
+        pdf.cell(200, 8, txt=clean_text(f"Date: {row['Date']} | Type: {type_str}"), ln=True)
         pdf.set_font("Arial", '', 10)
-        pdf.cell(200, 8, txt=f"Material: {row['Material']} | Qty: {row['Qty']}", ln=True)
+        pdf.cell(200, 8, txt=clean_text(f"Material: {row['Material']} | Qty: {row['Qty']}"), ln=True)
         pdf.ln(3)
     return pdf.output(dest='S').encode('latin-1')
 
