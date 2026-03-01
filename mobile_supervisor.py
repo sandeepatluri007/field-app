@@ -495,7 +495,6 @@ with tabs[2]:
         if not survey_data.empty:
             if 'Date' in survey_data.columns:
                 survey_data['Date'] = pd.to_datetime(survey_data['Date'], errors='coerce')
-                # --- SORTING LOGIC: Newest date first ---
                 survey_data['RowIndex'] = range(len(survey_data))
                 survey_data = survey_data.sort_values(by=['Date', 'RowIndex'], ascending=[False, True])
 
@@ -683,14 +682,19 @@ with tabs[2]:
             if box_col: meta_cols.append(box_col)
 
             df[meta_cols] = df[meta_cols].fillna('')
+            
+            # To fix the missing Lugs grouping issue, we sort purely by the metadata AND OriginalIndex
+            # This ensures even if a Lugs row is added 5 days later, it snaps adjacent to its Box/Cable parents.
+            df['OriginalIndex'] = range(len(df))
+            sort_cols = meta_cols + ['OriginalIndex']
+            df = df.sort_values(by=sort_cols)
+
+            # Now adjacent identical metadata represents a single group
             metadata_changed = (df[meta_cols] != df[meta_cols].shift()).any(axis=1)
             is_box = df['Material'].astype(str).str.contains('Box', case=False, na=False)
-
-            # This calculation mathematically groups Box/Cable/Lugs together exactly how they were inserted
             df['_sub_grp'] = (metadata_changed | is_box).cumsum()
             
-            # Now apply chronological sorting: Newest Date -> Newest SubGroup -> Original Index Order (Box -> Cable -> Lugs)
-            df['OriginalIndex'] = range(len(df))
+            # Sort for final display: Newest Date -> Newest SubGroup -> Original Box/Cable/Lugs sequence
             df = df.sort_values(by=['Date', '_sub_grp', 'OriginalIndex'], ascending=[False, False, True])
 
             st.markdown("###### Filters")
@@ -739,7 +743,6 @@ with tabs[2]:
                 ]
 
             if not fdf.empty:
-                # Grouping columns
                 group_cols_to_agg = ['_sub_grp', 'DateStr', 'Worker']
                 if id_col: group_cols_to_agg.append(id_col)
                 if ss_col: group_cols_to_agg.append(ss_col)
@@ -854,8 +857,14 @@ with tabs[2]:
                                 except: qty_r = 0.0
                                 mat_to_row[mat] = {'row_id': str(rr['ID']), 'qty': qty_r}
 
+                            # Inject missing standard materials for easy adding
+                            if not any('cable' in k.lower() for k in mat_to_row.keys()):
+                                mat_to_row['Cable'] = {'row_id': 'NEW_CABLE', 'qty': 0.0}
+                            if not any('lugs' in k.lower() for k in mat_to_row.keys()):
+                                mat_to_row['Lugs'] = {'row_id': 'NEW_LUGS', 'qty': 0.0}
+
                             with st.form(f"ef_wl_{i}"):
-                                st.caption(f"Editing {len(row_ids)} material row(s)")
+                                st.caption("Edit existing materials or add missing ones by entering a quantity > 0")
 
                                 st.markdown("###### Installation Details")
                                 n_date   = st.text_input("Date", value=date_val)
@@ -893,11 +902,39 @@ with tabs[2]:
                                 if box_col: meta_update[box_col] = n_box
                                 if cap_col: meta_update[cap_col] = n_cap
 
+                                # Push metadata updates to existing rows
                                 meta_ok = all(update_row_data("WorkLogs", rid, meta_update) for rid in row_ids)
+                                
                                 qty_ok = True
+                                new_rows_to_save = []
+
                                 for mat_name, new_qty in mat_qty_inputs.items():
-                                    if not update_row_data("WorkLogs", mat_to_row[mat_name]['row_id'], {"Qty": new_qty}):
-                                        qty_ok = False
+                                    rid = mat_to_row[mat_name]['row_id']
+                                    if rid.startswith("NEW_"):
+                                        if new_qty > 0:
+                                            new_row = {
+                                                "ID": str(uuid.uuid4()),
+                                                "Date": n_date,
+                                                "Site": str(raw_first.get('Site', '')),
+                                                "Worker": n_worker,
+                                                "Material": mat_name,
+                                                "Qty": new_qty,
+                                                "Latitude": str(raw_first.get('Latitude', '')),
+                                                "Longitude": str(raw_first.get('Longitude', '')),
+                                                "Synced": "FALSE"
+                                            }
+                                            if id_col: new_row[id_col] = n_dtr
+                                            if ss_col: new_row[ss_col] = n_ss
+                                            if box_col: new_row[box_col] = n_box
+                                            if cap_col: new_row[cap_col] = n_cap
+                                            new_rows_to_save.append(new_row)
+                                    else:
+                                        if not update_row_data("WorkLogs", rid, {"Qty": new_qty}):
+                                            qty_ok = False
+
+                                # Save any newly added materials (like missing Lugs)
+                                for new_r in new_rows_to_save:
+                                    save_row("WorkLogs", new_r)
 
                                 if meta_ok and qty_ok:
                                     st.session_state[f'eo_wl_{i}'] = False
@@ -976,7 +1013,6 @@ with tabs[2]:
         st.caption("View and export captured location data.")
         df_gps = get_data("WorkLogs")
         if not df_gps.empty and 'Latitude' in df_gps.columns:
-            # --- SORTING LOGIC: Newest date first ---
             if 'Date' in df_gps.columns:
                 df_gps['Date'] = pd.to_datetime(df_gps['Date'], errors='coerce')
                 df_gps['OriginalIndex'] = range(len(df_gps))
@@ -1022,7 +1058,6 @@ with tabs[2]:
     with t_inv_view:
         df_inv = get_data("Inventory")
         if not df_inv.empty:
-            # --- SORTING LOGIC: Newest date first ---
             if 'Date' in df_inv.columns:
                 df_inv['Date'] = pd.to_datetime(df_inv['Date'], errors='coerce')
                 df_inv['OriginalIndex'] = range(len(df_inv))
